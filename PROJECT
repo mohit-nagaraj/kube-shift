@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: kube-shift
 repo: github.com/mohit-nagaraj/kube-shift
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: mohitnagaraj.in
+  group: database
+  kind: DatabaseMigration
+  path: github.com/mohit-nagaraj/kube-shift/api/v1alpha1
+  version: v1alpha1
 version: "3"

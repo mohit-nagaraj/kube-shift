@@ -5,6 +5,8 @@
 // TODO(user): An in-depth paragraph about your project and overview of use
 
 ## Getting Started
+kubebuilder init --domain mohitnagaraj.in --repo github.com/mohit-nagaraj/kube-shift --project-name kube-shift
+kubebuilder create api --group database --version v1alpha1 --kind DatabaseMigration --resource=true --controller=true
 
 ### Prerequisites
 - go version v1.24.0+
