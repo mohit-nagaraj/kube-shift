@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -370,15 +371,20 @@ func (vs *ValidationService) extractTableNames(scripts []databasev1alpha1.Migrat
 	tables := make(map[string]bool)
 
 	for _, script := range scripts {
-		// Simple extraction - in production you'd use proper SQL parsing
-		content := strings.ToLower(script.Name)
-		if strings.Contains(content, "users") {
-			tables["users"] = true
+		// Load script content using ScriptLoader
+		scriptContent, err := vs.loadScriptContent(context.Background(), script)
+		if err != nil {
+			// Log error but continue with other scripts
+			log := log.FromContext(context.Background())
+			log.V(1).Info("Failed to load script content", "script", script.Name, "error", err)
+			continue
 		}
-		if strings.Contains(content, "orders") {
-			tables["orders"] = true
+
+		// Extract table names from SQL content
+		scriptTables := vs.parseTableNamesFromSQL(scriptContent)
+		for _, table := range scriptTables {
+			tables[table] = true
 		}
-		// Add more table name extraction logic as needed
 	}
 
 	result := make([]string, 0, len(tables))
@@ -387,6 +393,173 @@ func (vs *ValidationService) extractTableNames(scripts []databasev1alpha1.Migrat
 	}
 
 	return result
+}
+
+// loadScriptContent loads script content from various sources
+func (vs *ValidationService) loadScriptContent(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+	// Parse source and load content
+	switch {
+	case strings.HasPrefix(script.Source, "configmap://"):
+		return vs.loadFromConfigMap(ctx, script)
+	case strings.HasPrefix(script.Source, "secret://"):
+		return vs.loadFromSecret(ctx, script)
+	case strings.HasPrefix(script.Source, "inline://"):
+		return vs.loadInline(ctx, script)
+	case script.Source == "":
+		// Fallback to inline content if no source specified
+		return vs.loadInline(ctx, script)
+	default:
+		return "", fmt.Errorf("unsupported script source: %s", script.Source)
+	}
+}
+
+// loadFromConfigMap loads script content from a ConfigMap
+func (vs *ValidationService) loadFromConfigMap(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+	// Parse configmap reference: configmap://namespace/name/key
+	parts := strings.Split(strings.TrimPrefix(script.Source, "configmap://"), "/")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid configmap reference format: %s", script.Source)
+	}
+
+	namespace, name, key := parts[0], parts[1], parts[2]
+
+	configMap := &corev1.ConfigMap{}
+	configMapKey := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := vs.client.Get(ctx, configMapKey, configMap); err != nil {
+		return "", fmt.Errorf("failed to get configmap: %w", err)
+	}
+
+	content, exists := configMap.Data[key]
+	if !exists {
+		return "", fmt.Errorf("key %s not found in configmap %s/%s", key, namespace, name)
+	}
+
+	return content, nil
+}
+
+// loadFromSecret loads script content from a Secret
+func (vs *ValidationService) loadFromSecret(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+	// Parse secret reference: secret://namespace/name/key
+	parts := strings.Split(strings.TrimPrefix(script.Source, "secret://"), "/")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid secret reference format: %s", script.Source)
+	}
+
+	namespace, name, key := parts[0], parts[1], parts[2]
+
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := vs.client.Get(ctx, secretKey, secret); err != nil {
+		return "", fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	contentBytes, exists := secret.Data[key]
+	if !exists {
+		return "", fmt.Errorf("key %s not found in secret %s/%s", key, namespace, name)
+	}
+
+	return string(contentBytes), nil
+}
+
+// loadInline loads inline script content
+func (vs *ValidationService) loadInline(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+	// For inline content, we'll use the script name as a template
+	// In a real implementation, this might come from the script spec
+	switch script.Type {
+	case databasev1alpha1.ScriptTypeSchema:
+		return fmt.Sprintf("-- Schema migration script: %s\n-- Generated at: %s\nALTER TABLE users ADD COLUMN %s VARCHAR(255);",
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_")), nil
+	case databasev1alpha1.ScriptTypeData:
+		return fmt.Sprintf("-- Data migration script: %s\n-- Generated at: %s\nUPDATE users SET %s = 'default_value' WHERE %s IS NULL;",
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_"), strings.ReplaceAll(script.Name, "-", "_")), nil
+	case databasev1alpha1.ScriptTypeValidation:
+		return fmt.Sprintf("-- Validation script: %s\n-- Generated at: %s\nSELECT COUNT(*) FROM users WHERE %s IS NOT NULL;",
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_")), nil
+	default:
+		return fmt.Sprintf("-- Script: %s\n-- Generated at: %s\n-- No specific content for script type: %s",
+			script.Name, time.Now().Format(time.RFC3339), script.Type), nil
+	}
+}
+
+// parseTableNamesFromSQL extracts table names from SQL content using regex patterns
+func (vs *ValidationService) parseTableNamesFromSQL(content string) []string {
+	tables := make(map[string]bool)
+
+	// Convert to lowercase for case-insensitive matching
+	contentLower := strings.ToLower(content)
+
+	// Regex patterns for different SQL statements that reference tables
+	patterns := []struct {
+		pattern string
+		group   int
+	}{
+		// CREATE TABLE statements
+		{`create\s+table\s+(?:if\s+not\s+exists\s+)?([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// ALTER TABLE statements
+		{`alter\s+table\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// DROP TABLE statements
+		{`drop\s+table\s+(?:if\s+exists\s+)?([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// INSERT INTO statements
+		{`insert\s+(?:into\s+)?([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// UPDATE statements
+		{`update\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// DELETE FROM statements
+		{`delete\s+from\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// SELECT FROM statements (basic pattern)
+		{`from\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// JOIN statements
+		{`join\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+		// LEFT/RIGHT/INNER JOIN statements
+		{`(?:left|right|inner|outer)\s+join\s+([` + "`'\"" + `]?\w+[` + "`'\"" + `]?)`, 1},
+	}
+
+	for _, p := range patterns {
+		re := regexp.MustCompile(p.pattern)
+		matches := re.FindAllStringSubmatch(contentLower, -1)
+
+		for _, match := range matches {
+			if len(match) > p.group {
+				tableName := strings.Trim(match[p.group], "`'\"")
+				// Filter out common SQL keywords that might be captured
+				if !vs.isSQLKeyword(tableName) {
+					tables[tableName] = true
+				}
+			}
+		}
+	}
+
+	// Convert map to slice
+	result := make([]string, 0, len(tables))
+	for table := range tables {
+		result = append(result, table)
+	}
+
+	return result
+}
+
+// isSQLKeyword checks if a string is a common SQL keyword to avoid false positives
+func (vs *ValidationService) isSQLKeyword(word string) bool {
+	keywords := map[string]bool{
+		"select": true, "from": true, "where": true, "insert": true, "update": true,
+		"delete": true, "create": true, "alter": true, "drop": true, "table": true,
+		"into": true, "values": true, "set": true, "join": true, "left": true,
+		"right": true, "inner": true, "outer": true, "on": true, "as": true,
+		"order": true, "group": true, "by": true, "having": true, "limit": true,
+		"offset": true, "distinct": true, "count": true, "sum": true, "avg": true,
+		"max": true, "min": true, "case": true, "when": true, "then": true,
+		"else": true, "end": true, "if": true, "exists": true, "not": true,
+		"and": true, "or": true, "in": true, "between": true, "like": true,
+		"null": true, "is": true, "all": true, "any": true, "some": true,
+	}
+	return keywords[strings.ToLower(word)]
 }
 
 func (vs *ValidationService) checkCustomCondition(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, metrics *databasev1alpha1.MigrationMetrics, condition string) bool {
