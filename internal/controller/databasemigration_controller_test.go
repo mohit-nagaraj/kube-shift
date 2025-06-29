@@ -51,7 +51,25 @@ var _ = Describe("DatabaseMigration Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: databasev1alpha1.DatabaseMigrationSpec{
+						Database: databasev1alpha1.DatabaseConfig{
+							Type:             databasev1alpha1.DatabaseTypePostgreSQL,
+							ConnectionSecret: "test-secret",
+							Host:             "localhost",
+							Port:             5432,
+							Database:         "testdb",
+						},
+						Migration: databasev1alpha1.MigrationConfig{
+							Strategy: databasev1alpha1.MigrationStrategyShadowTable,
+							Scripts: []databasev1alpha1.MigrationScript{
+								{
+									Name:   "test-script",
+									Type:   databasev1alpha1.ScriptTypeSchema,
+									Source: "inline://test-script",
+								},
+							},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
