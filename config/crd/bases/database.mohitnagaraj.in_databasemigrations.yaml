@@ -286,6 +286,27 @@ spec:
                     description: Size of the backup
                     type: string
                 type: object
+              blueGreen:
+                description: BlueGreen information (for blue-green strategy)
+                properties:
+                  blueDatabase:
+                    description: BlueDatabase name (original)
+                    type: string
+                  greenDatabase:
+                    description: GreenDatabase name
+                    type: string
+                  phase:
+                    description: Phase of blue-green migration
+                    type: string
+                  trafficSwitched:
+                    description: TrafficSwitched indicates if traffic has been switched
+                      to green
+                    type: boolean
+                  validationPassed:
+                    description: ValidationPassed indicates if green database validation
+                      passed
+                    type: boolean
+                type: object
               completionTime:
                 description: CompletionTime when migration finished
                 format: date-time
@@ -398,6 +419,34 @@ spec:
               reason:
                 description: Reason for current status
                 type: string
+              rolling:
+                description: Rolling information (for rolling strategy)
+                properties:
+                  currentStep:
+                    description: CurrentStep being executed
+                    format: int32
+                    type: integer
+                  failedSteps:
+                    description: FailedSteps tracks failed steps for rollback
+                    items:
+                      format: int32
+                      type: integer
+                    type: array
+                  phase:
+                    description: Phase of rolling migration
+                    type: string
+                  rollbackPoint:
+                    description: RollbackPoint for failed migrations
+                    format: int32
+                    type: integer
+                  totalSteps:
+                    description: TotalSteps in the rolling migration
+                    format: int32
+                    type: integer
+                required:
+                - currentStep
+                - totalSteps
+                type: object
               shadowTable:
                 description: ShadowTable information (for shadow-table strategy)
                 properties:
