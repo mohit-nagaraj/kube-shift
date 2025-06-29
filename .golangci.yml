@@ -50,6 +50,3 @@ formatters:
       - third_party$
       - builtin$
       - examples$
-linters-settings:
-  gocyclo:
-    min-complexity: 35
