@@ -1,5 +1,5 @@
-// internal/engines/postgresql/engine.go
-package postgresql
+// internal/engines/mysql/engine.go
+package mysql
 
 import (
 	"context"
@@ -9,17 +9,17 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	_ "github.com/go-sql-driver/mysql" // MySQL driver
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	databasev1alpha1 "github.com/mohit-nagaraj/kube-shift/api/v1alpha1"
 	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
 )
 
-// Engine implements the MigrationEngine interface for PostgreSQL
+// Engine implements the MigrationEngine interface for MySQL
 type Engine struct{}
 
-// NewEngine creates a new PostgreSQL migration engine
+// NewEngine creates a new MySQL migration engine
 func NewEngine() interfaces.MigrationEngine {
 	return &Engine{}
 }
@@ -57,15 +57,11 @@ func (e *Engine) GetConnection(ctx context.Context, config databasev1alpha1.Data
 		return nil, fmt.Errorf("password not found in credentials")
 	}
 
-	sslMode := config.SSLMode
-	if sslMode == "" {
-		sslMode = "require"
-	}
+	// Build MySQL DSN
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true",
+		username, password, config.Host, config.Port, config.Database)
 
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Host, config.Port, username, password, config.Database, sslMode)
-
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
@@ -85,7 +81,7 @@ func (e *Engine) CreateShadowTable(ctx context.Context, db *sql.DB, migration *d
 	}
 
 	shadowTableName := migration.Status.ShadowTable.Name
-	
+
 	// Extract original table name from migration scripts
 	originalTable, err := e.extractTableName(migration.Spec.Migration.Scripts)
 	if err != nil {
@@ -94,7 +90,7 @@ func (e *Engine) CreateShadowTable(ctx context.Context, db *sql.DB, migration *d
 
 	// Create shadow table with same structure as original
 	createTableQuery := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (LIKE %s INCLUDING ALL);
+		CREATE TABLE IF NOT EXISTS %s LIKE %s
 	`, shadowTableName, originalTable)
 
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
@@ -106,10 +102,10 @@ func (e *Engine) CreateShadowTable(ctx context.Context, db *sql.DB, migration *d
 		if script.Type == databasev1alpha1.ScriptTypeSchema {
 			// Load script content (this would be implemented by ScriptLoader)
 			scriptContent := e.getScriptContent(script)
-			
+
 			// Replace table references with shadow table
 			modifiedScript := strings.ReplaceAll(scriptContent, originalTable, shadowTableName)
-			
+
 			if _, err := db.ExecContext(ctx, modifiedScript); err != nil {
 				return fmt.Errorf("failed to execute schema script %s: %w", script.Name, err)
 			}
@@ -156,14 +152,13 @@ func (e *Engine) SyncData(ctx context.Context, db *sql.DB, migration *databasev1
 	// Get the last processed ID
 	lastProcessedID := migration.Status.ShadowTable.RowsProcessed
 
-	// Copy data in batches
+	// Copy data in batches using MySQL-specific syntax
 	copyQuery := fmt.Sprintf(`
-		INSERT INTO %s 
+		INSERT IGNORE INTO %s 
 		SELECT * FROM %s 
-		WHERE %s > $1 
+		WHERE %s > ? 
 		ORDER BY %s 
-		LIMIT $2
-		ON CONFLICT DO NOTHING
+		LIMIT ?
 	`, shadowTableName, originalTable, pkColumn, pkColumn)
 
 	result, err := db.ExecContext(ctx, copyQuery, lastProcessedID, batchSize)
@@ -190,7 +185,7 @@ func (e *Engine) SyncData(ctx context.Context, db *sql.DB, migration *databasev1
 		if script.Type == databasev1alpha1.ScriptTypeData {
 			scriptContent := e.getScriptContent(script)
 			modifiedScript := strings.ReplaceAll(scriptContent, originalTable, shadowTableName)
-			
+
 			if _, err := db.ExecContext(ctx, modifiedScript); err != nil {
 				return fmt.Errorf("failed to execute data script %s: %w", script.Name, err)
 			}
@@ -222,13 +217,13 @@ func (e *Engine) SwapTables(ctx context.Context, db *sql.DB, migration *database
 	defer tx.Rollback()
 
 	// Rename original table to backup
-	renameOriginalQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", originalTable, backupTableName)
+	renameOriginalQuery := fmt.Sprintf("RENAME TABLE %s TO %s", originalTable, backupTableName)
 	if _, err := tx.ExecContext(ctx, renameOriginalQuery); err != nil {
 		return fmt.Errorf("failed to rename original table: %w", err)
 	}
 
 	// Rename shadow table to original
-	renameShadowQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", shadowTableName, originalTable)
+	renameShadowQuery := fmt.Sprintf("RENAME TABLE %s TO %s", shadowTableName, originalTable)
 	if _, err := tx.ExecContext(ctx, renameShadowQuery); err != nil {
 		return fmt.Errorf("failed to rename shadow table: %w", err)
 	}
@@ -269,13 +264,13 @@ func (e *Engine) Rollback(ctx context.Context, db *sql.DB, migration *databasev1
 	defer tx.Rollback()
 
 	// Rename current table (failed migration)
-	renameCurrentQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", originalTable, currentTableName)
+	renameCurrentQuery := fmt.Sprintf("RENAME TABLE %s TO %s", originalTable, currentTableName)
 	if _, err := tx.ExecContext(ctx, renameCurrentQuery); err != nil {
 		return fmt.Errorf("failed to rename current table during rollback: %w", err)
 	}
 
 	// Restore backup table
-	restoreQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", backupTableName, originalTable)
+	restoreQuery := fmt.Sprintf("RENAME TABLE %s TO %s", backupTableName, originalTable)
 	if _, err := tx.ExecContext(ctx, restoreQuery); err != nil {
 		return fmt.Errorf("failed to restore backup table: %w", err)
 	}
@@ -307,15 +302,14 @@ func (e *Engine) GetMetrics(ctx context.Context, db *sql.DB, migration *database
 		metrics.Duration = &metav1.Duration{Duration: duration}
 	}
 
-	// Get database metrics
+	// Get MySQL-specific metrics
 	var connections, qps int
 	metricsQuery := `
 		SELECT 
-			(SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
-			(SELECT sum(tup_returned + tup_fetched + tup_inserted + tup_updated + tup_deleted) 
-			 FROM pg_stat_database WHERE datname = current_database()) as total_queries
+			(SELECT COUNT(*) FROM information_schema.processlist WHERE command != 'Sleep') as active_connections,
+			(SELECT SUM(variable_value) FROM performance_schema.global_status WHERE variable_name IN ('Questions', 'Com_select', 'Com_insert', 'Com_update', 'Com_delete')) as total_queries
 	`
-	
+
 	if err := db.QueryRowContext(ctx, metricsQuery).Scan(&connections, &qps); err != nil {
 		return nil, fmt.Errorf("failed to get database metrics: %w", err)
 	}
@@ -350,9 +344,9 @@ func (e *Engine) ValidateDataIntegrity(ctx context.Context, db *sql.DB, migratio
 	}
 
 	// Check for data corruption by comparing checksums (if enabled)
-	if migration.Spec.Validation != nil && 
+	if migration.Spec.Validation != nil &&
 		migration.Spec.Validation.DataIntegrityChecks.ChecksumValidation {
-		
+
 		if err := e.validateChecksums(ctx, db, originalTable, migration); err != nil {
 			return fmt.Errorf("checksum validation failed: %w", err)
 		}
@@ -369,26 +363,29 @@ func (e *Engine) CreateBackup(ctx context.Context, db *sql.DB, migration *databa
 	}
 
 	backupTableName := fmt.Sprintf("%s_backup_%d", originalTable, time.Now().Unix())
-	
+
 	// Create backup table
 	backupQuery := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s", backupTableName, originalTable)
 	if _, err := db.ExecContext(ctx, backupQuery); err != nil {
 		return nil, fmt.Errorf("failed to create backup table: %w", err)
 	}
 
-	// Get backup size
+	// Get backup size (MySQL-specific)
 	sizeQuery := fmt.Sprintf(`
-		SELECT pg_size_pretty(pg_total_relation_size('%s')) as size
+		SELECT 
+			ROUND(((data_length + index_length) / 1024 / 1024), 2) AS 'Size (MB)'
+		FROM information_schema.tables 
+		WHERE table_schema = DATABASE() AND table_name = ?
 	`, backupTableName)
-	
-	var size string
-	if err := db.QueryRowContext(ctx, sizeQuery).Scan(&size); err != nil {
+
+	var sizeMB float64
+	if err := db.QueryRowContext(ctx, sizeQuery, backupTableName).Scan(&sizeMB); err != nil {
 		return nil, fmt.Errorf("failed to get backup size: %w", err)
 	}
 
 	return &databasev1alpha1.BackupInfo{
 		Location:  backupTableName,
-		Size:      size,
+		Size:      fmt.Sprintf("%.2f MB", sizeMB),
 		CreatedAt: &metav1.Time{Time: time.Now()},
 	}, nil
 }
@@ -401,8 +398,8 @@ func (e *Engine) RestoreFromBackup(ctx context.Context, db *sql.DB, backupInfo *
 
 	// This is a simplified restore - in production you'd want more sophisticated backup/restore
 	// For now, we'll assume the backup is a table that can be restored
-	restoreQuery := fmt.Sprintf("SELECT * FROM %s", backupInfo.Location)
-	
+	restoreQuery := fmt.Sprintf("SELECT * FROM %s LIMIT 1", backupInfo.Location)
+
 	// Test if backup table exists and is accessible
 	if _, err := db.ExecContext(ctx, restoreQuery); err != nil {
 		return fmt.Errorf("backup table is not accessible: %w", err)
@@ -419,7 +416,7 @@ func (e *Engine) validatePermissions(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS _test_permissions (id int)"); err != nil {
 		return fmt.Errorf("insufficient permissions to create tables: %w", err)
 	}
-	
+
 	// Clean up test table
 	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS _test_permissions"); err != nil {
 		return fmt.Errorf("insufficient permissions to drop tables: %w", err)
@@ -479,15 +476,14 @@ func (e *Engine) parseTableNameFromSQL(content string) string {
 // getPrimaryKeyColumn gets the primary key column name for a table
 func (e *Engine) getPrimaryKeyColumn(ctx context.Context, db *sql.DB, tableName string) (string, error) {
 	query := `
-		SELECT c.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name)
-		JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema
-		  AND tc.table_name = c.table_name AND ccu.column_name = c.column_name
-		WHERE constraint_type = 'PRIMARY KEY' AND tc.table_name = $1
+		SELECT column_name
+		FROM information_schema.key_column_usage
+		WHERE table_schema = DATABASE() 
+		  AND table_name = ? 
+		  AND constraint_name = 'PRIMARY'
 		LIMIT 1
 	`
-	
+
 	var pkColumn string
 	if err := db.QueryRowContext(ctx, query, tableName).Scan(&pkColumn); err != nil {
 		if err == sql.ErrNoRows {
@@ -496,7 +492,7 @@ func (e *Engine) getPrimaryKeyColumn(ctx context.Context, db *sql.DB, tableName 
 		}
 		return "", fmt.Errorf("failed to get primary key column: %w", err)
 	}
-	
+
 	return pkColumn, nil
 }
 
@@ -518,12 +514,12 @@ func (e *Engine) getScriptContent(script databasev1alpha1.MigrationScript) strin
 
 // validateChecksums validates data integrity using checksums
 func (e *Engine) validateChecksums(ctx context.Context, db *sql.DB, tableName string, migration *databasev1alpha1.DatabaseMigration) error {
-	// Calculate checksum for the table
+	// Calculate checksum for the table using MySQL MD5 function
 	checksumQuery := fmt.Sprintf(`
-		SELECT md5(string_agg(CAST(row_to_json(t) AS text), '' ORDER BY (SELECT column_name FROM information_schema.columns WHERE table_name = '%s' AND ordinal_position = 1)))
-		FROM %s t
-	`, tableName, tableName)
-	
+		SELECT MD5(GROUP_CONCAT(CONCAT_WS('|', *)))
+		FROM %s
+	`, tableName)
+
 	var calculatedChecksum string
 	if err := db.QueryRowContext(ctx, checksumQuery).Scan(&calculatedChecksum); err != nil {
 		return fmt.Errorf("failed to calculate table checksum: %w", err)

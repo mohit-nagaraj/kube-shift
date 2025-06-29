@@ -320,6 +320,42 @@ type BackupInfo struct {
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 }
 
+// BlueGreenInfo tracks blue-green migration status
+type BlueGreenInfo struct {
+	// Phase of blue-green migration
+	Phase string `json:"phase,omitempty"`
+
+	// GreenDatabase name
+	GreenDatabase string `json:"greenDatabase,omitempty"`
+
+	// BlueDatabase name (original)
+	BlueDatabase string `json:"blueDatabase,omitempty"`
+
+	// TrafficSwitched indicates if traffic has been switched to green
+	TrafficSwitched bool `json:"trafficSwitched,omitempty"`
+
+	// ValidationPassed indicates if green database validation passed
+	ValidationPassed bool `json:"validationPassed,omitempty"`
+}
+
+// RollingInfo tracks rolling migration status
+type RollingInfo struct {
+	// Phase of rolling migration
+	Phase string `json:"phase,omitempty"`
+
+	// TotalSteps in the rolling migration
+	TotalSteps int32 `json:"totalSteps"`
+
+	// CurrentStep being executed
+	CurrentStep int32 `json:"currentStep"`
+
+	// FailedSteps tracks failed steps for rollback
+	FailedSteps []int32 `json:"failedSteps,omitempty"`
+
+	// RollbackPoint for failed migrations
+	RollbackPoint int32 `json:"rollbackPoint,omitempty"`
+}
+
 // DatabaseMigrationStatus defines the observed state of DatabaseMigration
 type DatabaseMigrationStatus struct {
 	// Phase of the migration
@@ -345,6 +381,12 @@ type DatabaseMigrationStatus struct {
 
 	// BackupInfo for rollback purposes
 	BackupInfo *BackupInfo `json:"backupInfo,omitempty"`
+
+	// BlueGreen information (for blue-green strategy)
+	BlueGreen *BlueGreenInfo `json:"blueGreen,omitempty"`
+
+	// Rolling information (for rolling strategy)
+	Rolling *RollingInfo `json:"rolling,omitempty"`
 
 	// Message with human-readable status
 	Message string `json:"message,omitempty"`
