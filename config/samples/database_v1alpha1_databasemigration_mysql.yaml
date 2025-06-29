@@ -1,0 +1,54 @@
+apiVersion: database.mohitnagaraj.in/v1alpha1
+kind: DatabaseMigration
+metadata:
+  labels:
+    app.kubernetes.io/name: kube-shift
+    app.kubernetes.io/managed-by: kustomize
+  name: mysql-migration-sample
+  namespace: default
+spec:
+  database:
+    type: mysql
+    connectionSecret: mysql-credentials
+    host: mysql.default.svc.cluster.local
+    port: 3306
+    database: ordersdb
+    
+  migration:
+    strategy: rolling
+    scripts:
+      - name: add-order-status-index
+        type: schema
+        source: configmap://migrations/mysql_001_add_index.sql
+        timeout: 3m
+      - name: update-order-statuses
+        type: data
+        source: configmap://migrations/mysql_002_update_statuses.sql
+        dependsOn: ["add-order-status-index"]
+        timeout: 15m
+    parallel: true
+    batchSize: 500
+    
+  validation:
+    preChecks:
+      - type: connection
+      - type: permissions
+    dataIntegrityChecks:
+      enabled: true
+      samplePercentage: 5
+    performanceThresholds:
+      maxMigrationTime: 45m
+      maxCpuUsage: 75%
+      maxMemoryUsage: 65%
+      
+  rollback:
+    automatic: true
+    conditions:
+      - timeout
+      - performance-degradation
+    strategy: graceful
+    preserveBackup: true
+    
+  notifications:
+    slack:
+      webhook: mysql-slack-webhook-secret 

@@ -4,53 +4,52 @@ metadata:
   labels:
     app.kubernetes.io/name: kube-shift
     app.kubernetes.io/managed-by: kustomize
-  name: databasemigration-sample
+  name: bluegreen-migration-sample
   namespace: default
 spec:
   database:
     type: postgresql
-    connectionSecret: db-credentials
+    connectionSecret: postgres-credentials
     host: postgres.default.svc.cluster.local
     port: 5432
-    database: userdb
+    database: productiondb
     sslMode: require
     
   migration:
-    strategy: shadow-table
+    strategy: blue-green
     scripts:
-      - name: add-user-profile-column
+      - name: schema-upgrade-v2
         type: schema
-        source: configmap://migrations/001_add_profile_column.sql
-        checksum: sha256:abc123def456
-        timeout: 5m
-      - name: migrate-user-data
-        type: data
-        source: configmap://migrations/002_migrate_user_data.sql
-        dependsOn: ["add-user-profile-column"]
+        source: configmap://migrations/bluegreen_001_schema_v2.sql
         timeout: 10m
-      - name: validate-migration
+      - name: data-migration-v2
+        type: data
+        source: configmap://migrations/bluegreen_002_data_v2.sql
+        dependsOn: ["schema-upgrade-v2"]
+        timeout: 30m
+      - name: final-validation
         type: validation
-        source: configmap://migrations/003_validate_migration.sql
-        dependsOn: ["migrate-user-data"]
-        timeout: 2m
+        source: configmap://migrations/bluegreen_003_validate_v2.sql
+        dependsOn: ["data-migration-v2"]
+        timeout: 5m
     parallel: false
-    batchSize: 1000
+    batchSize: 2000
     
   validation:
     preChecks:
       - type: connection
       - type: permissions
       - type: disk-space
-        threshold: 20GB
+        threshold: 50GB
     dataIntegrityChecks:
       enabled: true
-      samplePercentage: 10
+      samplePercentage: 20
       checksumValidation: true
     performanceThresholds:
-      maxMigrationTime: 30m
+      maxMigrationTime: 60m
       maxDowntime: 0s
-      maxCpuUsage: 80%
-      maxMemoryUsage: 70%
+      maxCpuUsage: 70%
+      maxMemoryUsage: 60%
       
   rollback:
     automatic: true
@@ -63,6 +62,6 @@ spec:
     
   notifications:
     slack:
-      webhook: slack-webhook-secret
+      webhook: bluegreen-slack-webhook-secret
     email:
-      recipients: ["dba@company.com", "devops@company.com"]
+      recipients: ["dba@company.com", "devops@company.com", "cto@company.com"] 
