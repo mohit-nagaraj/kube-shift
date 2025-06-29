@@ -18,20 +18,44 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	databasev1alpha1 "github.com/mohit-nagaraj/kube-shift/api/v1alpha1"
+	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
 )
 
 // DatabaseMigrationReconciler reconciles a DatabaseMigration object
 type DatabaseMigrationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	Log    logr.Logger
+
+	// Migration engines for different database types
+	PostgreSQLEngine interfaces.MigrationEngine
+	MySQLEngine      interfaces.MigrationEngine
+	MariaDBEngine    interfaces.MigrationEngine
+
+	// Services
+	MetricsCollector     interfaces.MetricsCollector
+	NotificationService  interfaces.NotificationService
+	BackupService        interfaces.BackupService
+	ScriptLoader         interfaces.ScriptLoader
+	ValidationService    interfaces.ValidationService
 }
+
+// Finalizer name for cleanup
+const DatabaseMigrationFinalizer = "database.mohitnagaraj.in/finalizer"
 
 // +kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations/status,verbs=get;update;patch
