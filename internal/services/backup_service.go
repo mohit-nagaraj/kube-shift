@@ -1,11 +1,7 @@
 package services
 
 import (
-	"compress/gzip"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -14,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +44,13 @@ type BackupService struct {
 	backupDir string
 }
 
+// Storage type constants
+const (
+	StorageTypeS3    = "s3"
+	StorageTypeGCS   = "gcs"
+	StorageTypeAzure = "azure"
+)
+
 // BackupConfig holds backup configuration
 type BackupConfig struct {
 	StorageType string // "local", "s3", "gcs", "azure"
@@ -58,24 +60,28 @@ type BackupConfig struct {
 }
 
 // NewBackupService creates a new BackupService instance
-func NewBackupService(client client.Client) interfaces.BackupService {
+func NewBackupService(k8sClient client.Client) interfaces.BackupService {
 	return &BackupService{
-		client:    client,
+		client:    k8sClient,
 		backupDir: "/tmp/backups", // In production, this would be configurable
 	}
 }
 
 // CreateBackup creates a backup of the database
 func (bs *BackupService) CreateBackup(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (*databasev1alpha1.BackupInfo, error) {
-	log := log.FromContext(ctx)
-	log.Info("Creating database backup", "migration", migration.Name)
+	logger := log.FromContext(ctx)
+	logger.Info("Creating database backup", "migration", migration.Name)
 
 	// Get database connection
 	db, err := bs.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get database connection: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Create backup directory
 	if err := os.MkdirAll(bs.backupDir, 0755); err != nil {
@@ -108,14 +114,14 @@ func (bs *BackupService) CreateBackup(ctx context.Context, migration *databasev1
 	if bs.isCloudStorageConfigured(migration) {
 		cloudLocation, err := bs.uploadToCloudStorage(ctx, backupPath, migration)
 		if err != nil {
-			log.Error(err, "Failed to upload backup to cloud storage, keeping local copy")
+			logger.Error(err, "Failed to upload backup to cloud storage, keeping local copy")
 			// Don't fail the backup creation if cloud upload fails
 		} else {
 			storageLocation = cloudLocation
 		}
 	}
 
-	log.Info("Backup created successfully", "path", storageLocation, "size", backupSize)
+	logger.Info("Backup created successfully", "path", storageLocation, "size", backupSize)
 
 	return &databasev1alpha1.BackupInfo{
 		Location:  storageLocation,
@@ -126,15 +132,19 @@ func (bs *BackupService) CreateBackup(ctx context.Context, migration *databasev1
 
 // RestoreBackup restores a database from backup
 func (bs *BackupService) RestoreBackup(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, backupInfo *databasev1alpha1.BackupInfo) error {
-	log := log.FromContext(ctx)
-	log.Info("Restoring database from backup", "backup", backupInfo.Location)
+	logger := log.FromContext(ctx)
+	logger.Info("Restoring database from backup", "backup", backupInfo.Location)
 
 	// Get database connection
 	db, err := bs.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Download from cloud storage if needed
 	localPath := backupInfo.Location
@@ -143,7 +153,11 @@ func (bs *BackupService) RestoreBackup(ctx context.Context, migration *databasev
 		if err != nil {
 			return fmt.Errorf("failed to download backup from cloud storage: %w", err)
 		}
-		defer os.Remove(localPath) // Clean up local copy
+		defer func() {
+			if removeErr := os.Remove(localPath); removeErr != nil {
+				logger.Error(removeErr, "Failed to remove local backup copy", "path", localPath)
+			}
+		}() // Clean up local copy
 	}
 
 	// Restore backup based on database type
@@ -162,14 +176,14 @@ func (bs *BackupService) RestoreBackup(ctx context.Context, migration *databasev
 		return fmt.Errorf("failed to restore backup: %w", err)
 	}
 
-	log.Info("Backup restored successfully")
+	logger.Info("Backup restored successfully")
 	return nil
 }
 
 // DeleteBackup removes a backup
 func (bs *BackupService) DeleteBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo, migration *databasev1alpha1.DatabaseMigration) error {
-	log := log.FromContext(ctx)
-	log.Info("Deleting backup", "location", backupInfo.Location)
+	logger := log.FromContext(ctx)
+	logger.Info("Deleting backup", "location", backupInfo.Location)
 
 	// Delete from cloud storage if it's a cloud backup
 	if strings.HasPrefix(backupInfo.Location, "s3://") ||
@@ -183,14 +197,14 @@ func (bs *BackupService) DeleteBackup(ctx context.Context, backupInfo *databasev
 		return fmt.Errorf("failed to delete local backup: %w", err)
 	}
 
-	log.Info("Backup deleted successfully")
+	logger.Info("Backup deleted successfully")
 	return nil
 }
 
 // ValidateBackup checks if a backup is valid
 func (bs *BackupService) ValidateBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo, migration *databasev1alpha1.DatabaseMigration) error {
-	log := log.FromContext(ctx)
-	log.Info("Validating backup", "location", backupInfo.Location)
+	logger := log.FromContext(ctx)
+	logger.Info("Validating backup", "location", backupInfo.Location)
 
 	// Check if backup file exists
 	if strings.HasPrefix(backupInfo.Location, "/") {
@@ -209,7 +223,7 @@ func (bs *BackupService) ValidateBackup(ctx context.Context, backupInfo *databas
 		return fmt.Errorf("backup integrity check failed: %w", err)
 	}
 
-	log.Info("Backup validation passed")
+	logger.Info("Backup validation passed")
 	return nil
 }
 
@@ -328,7 +342,11 @@ func (bs *BackupService) createMySQLBackup(ctx context.Context, migration *datab
 	if err != nil {
 		return "", fmt.Errorf("failed to create backup file: %w", err)
 	}
-	defer outputFile.Close()
+	defer func() {
+		if closeErr := outputFile.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close output file", "path", backupPath)
+		}
+	}()
 
 	cmd.Stdout = outputFile
 
@@ -420,7 +438,11 @@ func (bs *BackupService) restoreMySQLBackup(ctx context.Context, migration *data
 	if err != nil {
 		return fmt.Errorf("failed to open backup file: %w", err)
 	}
-	defer inputFile.Close()
+	defer func() {
+		if closeErr := inputFile.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close input file", "path", backupPath)
+		}
+	}()
 
 	cmd.Stdin = inputFile
 
@@ -444,7 +466,7 @@ func (bs *BackupService) isCloudStorageConfigured(migration *databasev1alpha1.Da
 		// Check if there's a backup storage configuration
 		// This could be in annotations or a separate backup config
 		if storageType, exists := migration.Annotations["backup.storage.type"]; exists {
-			return storageType == "s3" || storageType == "gcs" || storageType == "azure"
+			return storageType == StorageTypeS3 || storageType == StorageTypeGCS || storageType == StorageTypeAzure
 		}
 	}
 	return false
@@ -467,11 +489,11 @@ func (bs *BackupService) uploadToCloudStorage(ctx context.Context, localPath str
 	cloudPath := fmt.Sprintf("%s://%s/backups/%s/%s", storageType, bucketName, migration.Namespace, fileName)
 
 	switch storageType {
-	case "s3":
+	case StorageTypeS3:
 		return bs.uploadToS3(ctx, localPath, cloudPath, migration)
-	case "gcs":
+	case StorageTypeGCS:
 		return bs.uploadToGCS(ctx, localPath, cloudPath, migration)
-	case "azure":
+	case StorageTypeAzure:
 		return bs.uploadToAzure(ctx, localPath, cloudPath, migration)
 	default:
 		return localPath, fmt.Errorf("unsupported storage type: %s", storageType)
@@ -509,7 +531,11 @@ func (bs *BackupService) uploadToS3(ctx context.Context, localPath, cloudPath st
 	if err != nil {
 		return localPath, fmt.Errorf("failed to open local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Upload to S3
 	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
@@ -526,7 +552,7 @@ func (bs *BackupService) uploadToS3(ctx context.Context, localPath, cloudPath st
 }
 
 // uploadToGCS uploads backup to Google Cloud Storage using GCS SDK
-func (bs *BackupService) uploadToGCS(ctx context.Context, localPath, cloudPath string, migration *databasev1alpha1.DatabaseMigration) (string, error) {
+func (bs *BackupService) uploadToGCS(ctx context.Context, localPath, cloudPath string, _ *databasev1alpha1.DatabaseMigration) (string, error) {
 	// Extract bucket and object from cloud path
 	// Format: gs://bucket-name/path/to/file
 	pathParts := strings.SplitN(cloudPath, "://", 2)
@@ -543,21 +569,29 @@ func (bs *BackupService) uploadToGCS(ctx context.Context, localPath, cloudPath s
 	object := bucketAndObject[1]
 
 	// Create GCS client
-	client, err := storage.NewClient(ctx)
+	gcsClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return localPath, fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		if closeErr := gcsClient.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close GCS client")
+		}
+	}()
 
 	// Open local file
 	file, err := os.Open(localPath)
 	if err != nil {
 		return localPath, fmt.Errorf("failed to open local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Get bucket and create object writer
-	bkt := client.Bucket(bucket)
+	bkt := gcsClient.Bucket(bucket)
 	obj := bkt.Object(object)
 	writer := obj.NewWriter(ctx)
 
@@ -600,7 +634,7 @@ func (bs *BackupService) uploadToAzure(ctx context.Context, localPath, cloudPath
 	// Create blob client
 	accountName := bs.getAzureStorageAccount(migration)
 	url := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
-	client, err := azblob.NewClient(url, cred, nil)
+	blobClient, err := azblob.NewClient(url, cred, nil)
 	if err != nil {
 		return localPath, fmt.Errorf("failed to create Azure blob client: %w", err)
 	}
@@ -610,12 +644,16 @@ func (bs *BackupService) uploadToAzure(ctx context.Context, localPath, cloudPath
 	if err != nil {
 		return localPath, fmt.Errorf("failed to open local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Upload to Azure Blob Storage
-	_, err = client.UploadFile(ctx, container, blob, file, &azblob.UploadFileOptions{})
+	_, err = blobClient.UploadFile(ctx, container, blob, file, &azblob.UploadFileOptions{})
 	if err != nil {
-		return localPath, fmt.Errorf("Azure upload failed: %w", err)
+		return localPath, fmt.Errorf("azure upload failed: %w", err)
 	}
 
 	return cloudPath, nil
@@ -651,23 +689,29 @@ func (bs *BackupService) downloadFromCloudStorage(ctx context.Context, cloudPath
 	if err != nil {
 		return cloudPath, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer tempFile.Close()
+	defer func() {
+		if closeErr := tempFile.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close temp file")
+		}
+	}()
 
 	localPath := tempFile.Name()
 
 	switch storageType {
-	case "s3":
+	case StorageTypeS3:
 		err = bs.downloadFromS3(ctx, cloudPath, localPath, migration)
-	case "gcs":
+	case StorageTypeGCS:
 		err = bs.downloadFromGCS(ctx, cloudPath, localPath, migration)
-	case "azure":
+	case StorageTypeAzure:
 		err = bs.downloadFromAzure(ctx, cloudPath, localPath, migration)
 	default:
 		return cloudPath, fmt.Errorf("unsupported storage type: %s", storageType)
 	}
 
 	if err != nil {
-		os.Remove(localPath) // Clean up temp file on error
+		if removeErr := os.Remove(localPath); removeErr != nil {
+			log.FromContext(ctx).Error(removeErr, "Failed to remove temp file on error", "path", localPath)
+		} // Clean up temp file on error
 		return cloudPath, err
 	}
 
@@ -705,16 +749,24 @@ func (bs *BackupService) downloadFromS3(ctx context.Context, cloudPath, localPat
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get S3 object: %w", err)
+		return fmt.Errorf("failed to get object from S3: %w", err)
 	}
-	defer result.Body.Close()
+	defer func() {
+		if closeErr := result.Body.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close S3 result body")
+		}
+	}()
 
 	// Create local file
 	file, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to create local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Copy data to local file
 	_, err = io.Copy(file, result.Body)
@@ -726,7 +778,7 @@ func (bs *BackupService) downloadFromS3(ctx context.Context, cloudPath, localPat
 }
 
 // downloadFromGCS downloads backup from Google Cloud Storage using GCS SDK
-func (bs *BackupService) downloadFromGCS(ctx context.Context, cloudPath, localPath string, migration *databasev1alpha1.DatabaseMigration) error {
+func (bs *BackupService) downloadFromGCS(ctx context.Context, cloudPath, localPath string, _ *databasev1alpha1.DatabaseMigration) error {
 	// Extract bucket and object from cloud path
 	pathParts := strings.SplitN(cloudPath, "://", 2)
 	if len(pathParts) != 2 {
@@ -742,27 +794,39 @@ func (bs *BackupService) downloadFromGCS(ctx context.Context, cloudPath, localPa
 	object := bucketAndObject[1]
 
 	// Create GCS client
-	client, err := storage.NewClient(ctx)
+	gcsClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		if closeErr := gcsClient.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close GCS client")
+		}
+	}()
 
 	// Get bucket and object reader
-	bkt := client.Bucket(bucket)
+	bkt := gcsClient.Bucket(bucket)
 	obj := bkt.Object(object)
 	reader, err := obj.NewReader(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create GCS reader: %w", err)
+		return fmt.Errorf("failed to create GCS object reader: %w", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close GCS reader")
+		}
+	}()
 
 	// Create local file
 	file, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to create local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Copy data to local file
 	_, err = io.Copy(file, reader)
@@ -798,7 +862,7 @@ func (bs *BackupService) downloadFromAzure(ctx context.Context, cloudPath, local
 	// Create blob client
 	accountName := bs.getAzureStorageAccount(migration)
 	url := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
-	client, err := azblob.NewClient(url, cred, nil)
+	blobClient, err := azblob.NewClient(url, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create Azure blob client: %w", err)
 	}
@@ -808,12 +872,16 @@ func (bs *BackupService) downloadFromAzure(ctx context.Context, cloudPath, local
 	if err != nil {
 		return fmt.Errorf("failed to create local file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close local file", "path", localPath)
+		}
+	}()
 
 	// Download from Azure Blob Storage
-	_, err = client.DownloadFile(ctx, container, blob, file, &azblob.DownloadFileOptions{})
+	_, err = blobClient.DownloadFile(ctx, container, blob, file, &azblob.DownloadFileOptions{})
 	if err != nil {
-		return fmt.Errorf("Azure download failed: %w", err)
+		return fmt.Errorf("azure download failed: %w", err)
 	}
 
 	// Check if download was successful by checking file size
@@ -889,7 +957,7 @@ func (bs *BackupService) deleteFromS3(ctx context.Context, cloudPath string, mig
 }
 
 // deleteFromGCS deletes backup from Google Cloud Storage using GCS SDK
-func (bs *BackupService) deleteFromGCS(ctx context.Context, cloudPath string, migration *databasev1alpha1.DatabaseMigration) error {
+func (bs *BackupService) deleteFromGCS(ctx context.Context, cloudPath string, _ *databasev1alpha1.DatabaseMigration) error {
 	// Extract bucket and object from cloud path
 	pathParts := strings.SplitN(cloudPath, "://", 2)
 	if len(pathParts) != 2 {
@@ -905,14 +973,18 @@ func (bs *BackupService) deleteFromGCS(ctx context.Context, cloudPath string, mi
 	object := bucketAndObject[1]
 
 	// Create GCS client
-	client, err := storage.NewClient(ctx)
+	gcsClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		if closeErr := gcsClient.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close GCS client")
+		}
+	}()
 
 	// Delete object from GCS
-	bkt := client.Bucket(bucket)
+	bkt := gcsClient.Bucket(bucket)
 	obj := bkt.Object(object)
 	if err := obj.Delete(ctx); err != nil {
 		return fmt.Errorf("GCS deletion failed: %w", err)
@@ -946,15 +1018,15 @@ func (bs *BackupService) deleteFromAzure(ctx context.Context, cloudPath string, 
 	// Create blob client
 	accountName := bs.getAzureStorageAccount(migration)
 	url := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
-	client, err := azblob.NewClient(url, cred, nil)
+	blobClient, err := azblob.NewClient(url, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create Azure blob client: %w", err)
 	}
 
 	// Delete from Azure Blob Storage
-	_, err = client.DeleteBlob(ctx, container, blob, &azblob.DeleteBlobOptions{})
+	_, err = blobClient.DeleteBlob(ctx, container, blob, &azblob.DeleteBlobOptions{})
 	if err != nil {
-		return fmt.Errorf("Azure deletion failed: %w", err)
+		return fmt.Errorf("azure deletion failed: %w", err)
 	}
 
 	return nil
@@ -970,11 +1042,11 @@ func (bs *BackupService) validateCloudBackup(ctx context.Context, cloudPath stri
 	storageType := pathParts[0]
 
 	switch storageType {
-	case "s3":
+	case StorageTypeS3:
 		return bs.validateS3Backup(ctx, cloudPath, migration)
-	case "gcs":
+	case StorageTypeGCS:
 		return bs.validateGCSBackup(ctx, cloudPath, migration)
-	case "azure":
+	case StorageTypeAzure:
 		return bs.validateAzureBackup(ctx, cloudPath, migration)
 	default:
 		return fmt.Errorf("unsupported storage type: %s", storageType)
@@ -1020,7 +1092,7 @@ func (bs *BackupService) validateS3Backup(ctx context.Context, cloudPath string,
 }
 
 // validateGCSBackup validates backup in Google Cloud Storage using GCS SDK
-func (bs *BackupService) validateGCSBackup(ctx context.Context, cloudPath string, migration *databasev1alpha1.DatabaseMigration) error {
+func (bs *BackupService) validateGCSBackup(ctx context.Context, cloudPath string, _ *databasev1alpha1.DatabaseMigration) error {
 	// Extract bucket and object from cloud path
 	pathParts := strings.SplitN(cloudPath, "://", 2)
 	if len(pathParts) != 2 {
@@ -1036,14 +1108,18 @@ func (bs *BackupService) validateGCSBackup(ctx context.Context, cloudPath string
 	object := bucketAndObject[1]
 
 	// Create GCS client
-	client, err := storage.NewClient(ctx)
+	gcsClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		if closeErr := gcsClient.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close GCS client")
+		}
+	}()
 
 	// Check if object exists
-	bkt := client.Bucket(bucket)
+	bkt := gcsClient.Bucket(bucket)
 	obj := bkt.Object(object)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
@@ -1083,40 +1159,50 @@ func (bs *BackupService) validateAzureBackup(ctx context.Context, cloudPath stri
 	// Create blob client
 	accountName := bs.getAzureStorageAccount(migration)
 	url := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
-	client, err := azblob.NewClient(url, cred, nil)
+	blobClient, err := azblob.NewClient(url, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create Azure blob client: %w", err)
 	}
 
-	// Check if blob exists by trying to download a small portion
-	tempFile, err := os.CreateTemp("", "azure_validation_*")
+	// Create temporary file for validation
+	tempFile, err := os.CreateTemp(bs.backupDir, "backup_validate_*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file for validation: %w", err)
 	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
+	defer func() {
+		if closeErr := tempFile.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close temp file")
+		}
+		if removeErr := os.Remove(tempFile.Name()); removeErr != nil {
+			log.FromContext(ctx).Error(removeErr, "Failed to remove temp file")
+		}
+	}()
 
 	// Try to download just the first byte to check if blob exists
-	_, err = client.DownloadFile(ctx, container, blob, tempFile, &azblob.DownloadFileOptions{
+	_, err = blobClient.DownloadFile(ctx, container, blob, tempFile, &azblob.DownloadFileOptions{
 		Range: azblob.HTTPRange{
 			Offset: 0,
 			Count:  1,
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("Azure blob not found: %w", err)
+		return fmt.Errorf("azure blob not found: %w", err)
 	}
 
 	return nil
 }
 
-func (bs *BackupService) checkBackupIntegrity(ctx context.Context, backupPath string) error {
+func (bs *BackupService) checkBackupIntegrity(_ context.Context, backupPath string) error {
 	// Open backup file
 	file, err := os.Open(backupPath)
 	if err != nil {
 		return fmt.Errorf("failed to open backup file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(context.Background()).Error(closeErr, "Failed to close backup file", "path", backupPath)
+		}
+	}()
 
 	// Read first few bytes to check file format
 	header := make([]byte, 512)
@@ -1173,7 +1259,11 @@ func (bs *BackupService) calculateFileChecksum(backupPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file for checksum: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.FromContext(context.Background()).Error(closeErr, "Failed to close file for checksum", "path", backupPath)
+		}
+	}()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
@@ -1197,206 +1287,4 @@ func (bs *BackupService) formatFileSize(size int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
-}
-
-func (bs *BackupService) compressBackup(ctx context.Context, backupPath string) (string, error) {
-	// Create compressed file path
-	compressedPath := backupPath + ".gz"
-
-	// Open source file
-	source, err := os.Open(backupPath)
-	if err != nil {
-		return backupPath, fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer source.Close()
-
-	// Create compressed file
-	compressed, err := os.Create(compressedPath)
-	if err != nil {
-		return backupPath, fmt.Errorf("failed to create compressed file: %w", err)
-	}
-	defer compressed.Close()
-
-	// Use gzip compression
-	gzipWriter := gzip.NewWriter(compressed)
-	defer gzipWriter.Close()
-
-	// Copy and compress
-	if _, err := io.Copy(gzipWriter, source); err != nil {
-		return backupPath, fmt.Errorf("failed to compress file: %w", err)
-	}
-
-	// Remove original file
-	if err := os.Remove(backupPath); err != nil {
-		return backupPath, fmt.Errorf("failed to remove original file: %w", err)
-	}
-
-	return compressedPath, nil
-}
-
-func (bs *BackupService) encryptBackup(ctx context.Context, backupPath string, migration *databasev1alpha1.DatabaseMigration) (string, error) {
-	// Get encryption key from secret
-	secret := &corev1.Secret{}
-	secretKey := types.NamespacedName{
-		Name:      "backup-encryption-key",
-		Namespace: migration.Namespace,
-	}
-
-	if err := bs.client.Get(ctx, secretKey, secret); err != nil {
-		return backupPath, fmt.Errorf("failed to get encryption key: %w", err)
-	}
-
-	key := secret.Data["key"]
-	if len(key) != 32 {
-		return backupPath, fmt.Errorf("encryption key must be 32 bytes")
-	}
-
-	// Read source file
-	plaintext, err := os.ReadFile(backupPath)
-	if err != nil {
-		return backupPath, fmt.Errorf("failed to read source file: %w", err)
-	}
-
-	// Create cipher
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return backupPath, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return backupPath, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	// Create nonce
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return backupPath, fmt.Errorf("failed to create nonce: %w", err)
-	}
-
-	// Encrypt
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-
-	// Write encrypted file
-	encryptedPath := backupPath + ".enc"
-	if err := os.WriteFile(encryptedPath, ciphertext, 0644); err != nil {
-		return backupPath, fmt.Errorf("failed to write encrypted file: %w", err)
-	}
-
-	// Remove original file
-	if err := os.Remove(backupPath); err != nil {
-		return backupPath, fmt.Errorf("failed to remove original file: %w", err)
-	}
-
-	return encryptedPath, nil
-}
-
-func (bs *BackupService) cleanupOldBackups(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) error {
-	// Get retention period from annotations
-	retentionDays := 30 // Default retention
-	if retentionStr, exists := migration.Annotations["backup.retention.days"]; exists {
-		if days, err := strconv.Atoi(retentionStr); err == nil {
-			retentionDays = days
-		}
-	}
-
-	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
-
-	// List backup files
-	files, err := os.ReadDir(bs.backupDir)
-	if err != nil {
-		return fmt.Errorf("failed to read backup directory: %w", err)
-	}
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-
-		// Check if file is older than retention period
-		fileInfo, err := file.Info()
-		if err != nil {
-			continue
-		}
-
-		if fileInfo.ModTime().Before(cutoffTime) {
-			filePath := filepath.Join(bs.backupDir, file.Name())
-			if err := os.Remove(filePath); err != nil {
-				log.FromContext(ctx).Error(err, "Failed to remove old backup", "file", filePath)
-			} else {
-				log.FromContext(ctx).Info("Removed old backup", "file", filePath)
-			}
-		}
-	}
-
-	return nil
-}
-
-func (bs *BackupService) getBackupMetadata(backupPath string) (map[string]string, error) {
-	metadata := make(map[string]string)
-
-	// Get file info
-	fileInfo, err := os.Stat(backupPath)
-	if err != nil {
-		return metadata, fmt.Errorf("failed to get file info: %w", err)
-	}
-
-	metadata["size"] = bs.formatFileSize(fileInfo.Size())
-	metadata["modified"] = fileInfo.ModTime().Format(time.RFC3339)
-	metadata["permissions"] = fileInfo.Mode().String()
-
-	// Extract database-specific metadata
-	if strings.HasSuffix(backupPath, ".sql") {
-		sqlMetadata, err := bs.extractSQLMetadata(backupPath)
-		if err == nil {
-			for k, v := range sqlMetadata {
-				metadata[k] = v
-			}
-		}
-	}
-
-	return metadata, nil
-}
-
-func (bs *BackupService) extractSQLMetadata(backupPath string) (map[string]string, error) {
-	metadata := make(map[string]string)
-
-	file, err := os.Open(backupPath)
-	if err != nil {
-		return metadata, fmt.Errorf("failed to open SQL file: %w", err)
-	}
-	defer file.Close()
-
-	// Read first 8KB to extract metadata
-	buffer := make([]byte, 8192)
-	n, err := file.Read(buffer)
-	if err != nil && err != io.EOF {
-		return metadata, fmt.Errorf("failed to read SQL file: %w", err)
-	}
-
-	content := string(buffer[:n])
-
-	// Extract common SQL metadata
-	if strings.Contains(content, "MySQL dump") {
-		metadata["type"] = "MySQL"
-	} else if strings.Contains(content, "PostgreSQL") {
-		metadata["type"] = "PostgreSQL"
-	} else if strings.Contains(content, "MariaDB") {
-		metadata["type"] = "MariaDB"
-	}
-
-	// Extract version information
-	if versionMatch := strings.Contains(content, "Server version"); versionMatch {
-		// Extract version from comment lines
-		lines := strings.Split(content, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "Server version") {
-				metadata["version"] = strings.TrimSpace(line)
-				break
-			}
-		}
-	}
-
-	return metadata, nil
 }

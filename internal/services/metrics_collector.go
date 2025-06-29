@@ -93,7 +93,7 @@ func NewMetricsCollector() interfaces.MetricsCollector {
 
 // RecordMigrationStart records the start of a migration
 func (mc *MetricsCollector) RecordMigrationStart(migration *databasev1alpha1.DatabaseMigration) {
-	log := log.FromContext(context.Background())
+	logger := log.FromContext(context.Background())
 
 	migrationKey := mc.getMigrationKey(migration)
 
@@ -115,12 +115,12 @@ func (mc *MetricsCollector) RecordMigrationStart(migration *databasev1alpha1.Dat
 	// Update progress metric
 	mc.updateProgressMetric(migration, 0)
 
-	log.V(1).Info("Migration start recorded", "migration", migration.Name)
+	logger.V(1).Info("Migration start recorded", "migration", migration.Name)
 }
 
 // RecordMigrationEnd records the completion of a migration
 func (mc *MetricsCollector) RecordMigrationEnd(migration *databasev1alpha1.DatabaseMigration, success bool) {
-	log := log.FromContext(context.Background())
+	logger := log.FromContext(context.Background())
 
 	migrationKey := mc.getMigrationKey(migration)
 
@@ -164,7 +164,7 @@ func (mc *MetricsCollector) RecordMigrationEnd(migration *databasev1alpha1.Datab
 	// Clean up metrics
 	delete(mc.metrics, migrationKey)
 
-	log.V(1).Info("Migration end recorded", "migration", migration.Name, "success", success, "duration", duration)
+	logger.V(1).Info("Migration end recorded", "migration", migration.Name, "success", success, "duration", duration)
 }
 
 // UpdateProgress updates migration progress metrics
@@ -188,7 +188,7 @@ func (mc *MetricsCollector) UpdateProgress(migration *databasev1alpha1.DatabaseM
 
 // RecordError records migration errors
 func (mc *MetricsCollector) RecordError(migration *databasev1alpha1.DatabaseMigration, err error) {
-	log := log.FromContext(context.Background())
+	logger := log.FromContext(context.Background())
 
 	// Determine error type
 	errorType := "unknown"
@@ -217,7 +217,7 @@ func (mc *MetricsCollector) RecordError(migration *databasev1alpha1.DatabaseMigr
 		errorType,
 	).Inc()
 
-	log.V(1).Info("Migration error recorded", "migration", migration.Name, "error_type", errorType)
+	logger.V(1).Info("Migration error recorded", "migration", migration.Name, "error_type", errorType)
 }
 
 // GetMetrics returns current metrics for a migration

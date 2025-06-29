@@ -56,9 +56,9 @@ type EmailMessage struct {
 }
 
 // NewNotificationService creates a new NotificationService instance
-func NewNotificationService(client client.Client) interfaces.NotificationService {
+func NewNotificationService(k8sClient client.Client) interfaces.NotificationService {
 	return &NotificationService{
-		client: client,
+		client: k8sClient,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -101,7 +101,7 @@ func (ns *NotificationService) SendRollbackStarted(ctx context.Context, migratio
 // Helper methods
 
 func (ns *NotificationService) sendNotifications(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, message, details, color string) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	if migration.Spec.Notifications == nil {
 		return nil
@@ -110,7 +110,7 @@ func (ns *NotificationService) sendNotifications(ctx context.Context, migration 
 	// Send Slack notification
 	if migration.Spec.Notifications.Slack != nil {
 		if err := ns.sendSlackNotification(ctx, migration, message, details, color); err != nil {
-			log.Error(err, "Failed to send Slack notification")
+			logger.Error(err, "Failed to send Slack notification")
 			// Don't fail the entire notification process for Slack errors
 		}
 	}
@@ -118,7 +118,7 @@ func (ns *NotificationService) sendNotifications(ctx context.Context, migration 
 	// Send email notification
 	if migration.Spec.Notifications.Email != nil {
 		if err := ns.sendEmailNotification(ctx, migration, message, details); err != nil {
-			log.Error(err, "Failed to send email notification")
+			logger.Error(err, "Failed to send email notification")
 			// Don't fail the entire notification process for email errors
 		}
 	}
@@ -200,10 +200,15 @@ func (ns *NotificationService) sendSlackNotification(ctx context.Context, migrat
 	if err != nil {
 		return fmt.Errorf("failed to send Slack notification: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		logger := log.FromContext(ctx)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close response body")
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Slack API returned status code: %d", resp.StatusCode)
+		return fmt.Errorf("slack API returned status code: %d", resp.StatusCode)
 	}
 
 	return nil
@@ -278,7 +283,7 @@ func (ns *NotificationService) sendEmail(smtpHost, smtpPort, username, password 
 func (ns *NotificationService) buildMigrationDetails(migration *databasev1alpha1.DatabaseMigration, status string) string {
 	var details strings.Builder
 
-	details.WriteString(fmt.Sprintf("**Migration Details:**\n"))
+	details.WriteString("**Migration Details:**\n")
 	details.WriteString(fmt.Sprintf("• Name: %s\n", migration.Name))
 	details.WriteString(fmt.Sprintf("• Namespace: %s\n", migration.Namespace))
 	details.WriteString(fmt.Sprintf("• Database: %s (%s)\n", migration.Spec.Database.Database, migration.Spec.Database.Type))

@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // MariaDB uses the MySQL driver
+	_ "github.com/go-sql-driver/mysql" // MySQL driver
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	databasev1alpha1 "github.com/mohit-nagaraj/kube-shift/api/v1alpha1"
 	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
@@ -39,7 +40,11 @@ func (e *Engine) ValidateConnection(ctx context.Context, config databasev1alpha1
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close database connection")
+		}
+	}()
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
@@ -182,9 +187,13 @@ func (e *Engine) SwapTables(ctx context.Context, db *sql.DB, migration *database
 	backupTableName := fmt.Sprintf("%s_backup_%d", originalTable, time.Now().Unix())
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to start transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			log.FromContext(ctx).Error(rollbackErr, "Failed to rollback transaction")
+		}
+	}()
 	renameOriginalQuery := fmt.Sprintf("RENAME TABLE %s TO %s", originalTable, backupTableName)
 	if _, err := tx.ExecContext(ctx, renameOriginalQuery); err != nil {
 		return fmt.Errorf("failed to rename original table: %w", err)
@@ -215,9 +224,13 @@ func (e *Engine) Rollback(ctx context.Context, db *sql.DB, migration *databasev1
 	currentTableName := fmt.Sprintf("%s_failed_%d", originalTable, time.Now().Unix())
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to start rollback transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			log.FromContext(ctx).Error(rollbackErr, "Failed to rollback transaction")
+		}
+	}()
 	renameCurrentQuery := fmt.Sprintf("RENAME TABLE %s TO %s", originalTable, currentTableName)
 	if _, err := tx.ExecContext(ctx, renameCurrentQuery); err != nil {
 		return fmt.Errorf("failed to rename current table during rollback: %w", err)
@@ -293,7 +306,7 @@ func (e *Engine) CreateBackup(ctx context.Context, db *sql.DB, migration *databa
 	if _, err := db.ExecContext(ctx, backupQuery); err != nil {
 		return nil, fmt.Errorf("failed to create backup table: %w", err)
 	}
-	sizeQuery := fmt.Sprintf(`SELECT ROUND(((data_length + index_length) / 1024 / 1024), 2) AS 'Size (MB)' FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?`, backupTableName)
+	sizeQuery := `SELECT ROUND(((data_length + index_length) / 1024 / 1024), 2) AS 'Size (MB)' FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?`
 	var sizeMB float64
 	if err := db.QueryRowContext(ctx, sizeQuery, backupTableName).Scan(&sizeMB); err != nil {
 		return nil, fmt.Errorf("failed to get backup size: %w", err)

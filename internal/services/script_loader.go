@@ -40,9 +40,9 @@ type CachedScript struct {
 }
 
 // NewScriptLoader creates a new ScriptLoader instance
-func NewScriptLoader(client client.Client) interfaces.ScriptLoader {
+func NewScriptLoader(k8sClient client.Client) interfaces.ScriptLoader {
 	return &ScriptLoader{
-		client: client,
+		client: k8sClient,
 		cache: &ScriptCache{
 			scripts: make(map[string]*CachedScript),
 		},
@@ -51,11 +51,11 @@ func NewScriptLoader(client client.Client) interfaces.ScriptLoader {
 
 // LoadScript loads a migration script from various sources
 func (sl *ScriptLoader) LoadScript(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Check cache first
 	if cached := sl.cache.get(script.Name); cached != nil {
-		log.V(1).Info("Using cached script", "script", script.Name)
+		logger.V(1).Info("Using cached script", "script", script.Name)
 		return cached.Content, nil
 	}
 
@@ -69,10 +69,10 @@ func (sl *ScriptLoader) LoadScript(ctx context.Context, script databasev1alpha1.
 	case strings.HasPrefix(script.Source, "secret://"):
 		content, err = sl.loadFromSecret(ctx, script)
 	case strings.HasPrefix(script.Source, "inline://"):
-		content, err = sl.loadInline(ctx, script)
+		content = sl.loadInline(script)
 	case script.Source == "":
 		// Fallback to inline content if no source specified
-		content, err = sl.loadInline(ctx, script)
+		content = sl.loadInline(script)
 	default:
 		return "", fmt.Errorf("unsupported script source: %s", script.Source)
 	}
@@ -94,7 +94,7 @@ func (sl *ScriptLoader) LoadScript(ctx context.Context, script databasev1alpha1.
 
 // ValidateScript validates script syntax and checksum
 func (sl *ScriptLoader) ValidateScript(ctx context.Context, script databasev1alpha1.MigrationScript, content string) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Validate checksum if provided
 	if script.Checksum != "" {
@@ -102,7 +102,7 @@ func (sl *ScriptLoader) ValidateScript(ctx context.Context, script databasev1alp
 		if !strings.HasSuffix(script.Checksum, calculatedChecksum) {
 			return fmt.Errorf("checksum mismatch: expected %s, got %s", script.Checksum, calculatedChecksum)
 		}
-		log.V(1).Info("Script checksum validated", "script", script.Name)
+		logger.V(1).Info("Script checksum validated", "script", script.Name)
 	}
 
 	// Basic SQL syntax validation
@@ -111,9 +111,7 @@ func (sl *ScriptLoader) ValidateScript(ctx context.Context, script databasev1alp
 	}
 
 	// Check for dangerous operations if validation is enabled
-	if err := sl.validateSafety(content, script.Type); err != nil {
-		return fmt.Errorf("safety validation failed: %w", err)
-	}
+	sl.validateSafety(content)
 
 	return nil
 }
@@ -181,22 +179,22 @@ func (sl *ScriptLoader) loadFromSecret(ctx context.Context, script databasev1alp
 }
 
 // loadInline loads inline script content
-func (sl *ScriptLoader) loadInline(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+func (sl *ScriptLoader) loadInline(script databasev1alpha1.MigrationScript) string {
 	// For inline content, we'll use the script name as a template
 	// In a real implementation, this might come from the script spec
 	switch script.Type {
 	case databasev1alpha1.ScriptTypeSchema:
 		return fmt.Sprintf("-- Schema migration script: %s\n-- Generated at: %s\nALTER TABLE users ADD COLUMN %s VARCHAR(255);",
-			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_")), nil
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_"))
 	case databasev1alpha1.ScriptTypeData:
 		return fmt.Sprintf("-- Data migration script: %s\n-- Generated at: %s\nUPDATE users SET %s = 'default_value' WHERE %s IS NULL;",
-			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_"), strings.ReplaceAll(script.Name, "-", "_")), nil
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_"), strings.ReplaceAll(script.Name, "-", "_"))
 	case databasev1alpha1.ScriptTypeValidation:
 		return fmt.Sprintf("-- Validation script: %s\n-- Generated at: %s\nSELECT COUNT(*) FROM users WHERE %s IS NOT NULL;",
-			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_")), nil
+			script.Name, time.Now().Format(time.RFC3339), strings.ReplaceAll(script.Name, "-", "_"))
 	default:
-		return fmt.Sprintf("-- Script: %s\n-- Generated at: %s\n-- No specific content for script type: %s",
-			script.Name, time.Now().Format(time.RFC3339), script.Type), nil
+		return fmt.Sprintf("-- Generic script: %s\n-- Generated at: %s\nSELECT 1;",
+			script.Name, time.Now().Format(time.RFC3339))
 	}
 }
 
@@ -249,7 +247,7 @@ func (sl *ScriptLoader) validateSQLSyntax(content string, scriptType databasev1a
 }
 
 // validateSafety checks for potentially dangerous operations
-func (sl *ScriptLoader) validateSafety(content string, scriptType databasev1alpha1.ScriptType) error {
+func (sl *ScriptLoader) validateSafety(content string) string {
 	contentLower := strings.ToLower(content)
 
 	// Check for dangerous operations
@@ -269,7 +267,7 @@ func (sl *ScriptLoader) validateSafety(content string, scriptType databasev1alph
 		}
 	}
 
-	return nil
+	return ""
 }
 
 // Cache methods
@@ -294,10 +292,4 @@ func (sc *ScriptCache) set(key, content, checksum string) {
 		LoadedAt:  time.Now(),
 		ExpiresAt: time.Now().Add(30 * time.Minute), // Cache for 30 minutes
 	}
-}
-
-func (sc *ScriptCache) clear() {
-	sc.mutex.Lock()
-	defer sc.mutex.Unlock()
-	sc.scripts = make(map[string]*CachedScript)
 }

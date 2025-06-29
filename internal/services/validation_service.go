@@ -21,29 +21,38 @@ import (
 	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
 )
 
+// Validation constants
+const (
+	HundredPercent = "100%"
+)
+
 // ValidationService implements the ValidationService interface
 type ValidationService struct {
 	client client.Client
 }
 
 // NewValidationService creates a new ValidationService instance
-func NewValidationService(client client.Client) interfaces.ValidationService {
+func NewValidationService(k8sClient client.Client) interfaces.ValidationService {
 	return &ValidationService{
-		client: client,
+		client: k8sClient,
 	}
 }
 
-// RunPreChecks runs pre-migration validation checks
+// RunPreChecks runs all pre-migration checks
 func (vs *ValidationService) RunPreChecks(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) error {
-	log := log.FromContext(ctx)
-	log.Info("Running pre-migration checks", "migration", migration.Name)
+	logger := log.FromContext(ctx)
+	logger.Info("Running pre-migration checks", "migration", migration.Name)
 
 	// Get database connection
 	db, err := vs.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Run connection checks
 	if err := vs.checkConnection(ctx, db); err != nil {
@@ -56,9 +65,7 @@ func (vs *ValidationService) RunPreChecks(ctx context.Context, migration *databa
 	}
 
 	// Run disk space checks
-	if err := vs.checkDiskSpace(ctx, db, migration); err != nil {
-		return fmt.Errorf("disk space check failed: %w", err)
-	}
+	vs.checkDiskSpace(ctx, migration)
 
 	// Run table existence checks
 	if err := vs.checkTableExistence(ctx, db, migration); err != nil {
@@ -71,20 +78,20 @@ func (vs *ValidationService) RunPreChecks(ctx context.Context, migration *databa
 	}
 
 	// Run performance baseline checks
-	if err := vs.checkPerformanceBaseline(ctx, db, migration); err != nil {
+	if err := vs.checkPerformanceBaseline(ctx, db); err != nil {
 		return fmt.Errorf("performance baseline check failed: %w", err)
 	}
 
-	log.Info("All pre-migration checks passed", "migration", migration.Name)
+	logger.Info("All pre-migration checks passed", "migration", migration.Name)
 	return nil
 }
 
 // ValidatePerformance checks if migration meets performance thresholds
 func (vs *ValidationService) ValidatePerformance(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, metrics *databasev1alpha1.MigrationMetrics) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	if migration.Spec.Validation == nil {
-		log.V(1).Info("No validation configured, skipping performance validation")
+		logger.V(1).Info("No validation configured, skipping performance validation")
 		return nil
 	}
 
@@ -127,7 +134,7 @@ func (vs *ValidationService) ValidatePerformance(ctx context.Context, migration 
 		}
 	}
 
-	log.V(1).Info("Performance validation passed", "migration", migration.Name)
+	logger.V(1).Info("Performance validation passed", "migration", migration.Name)
 	return nil
 }
 
@@ -158,7 +165,7 @@ func (vs *ValidationService) ShouldRollback(ctx context.Context, migration *data
 	// Check custom rollback conditions
 	if migration.Spec.Rollback.Conditions != nil {
 		for _, condition := range migration.Spec.Rollback.Conditions {
-			if vs.checkCustomCondition(ctx, migration, metrics, condition) {
+			if vs.checkCustomCondition(metrics, condition) {
 				return true, condition, fmt.Errorf("custom rollback condition triggered: %s", condition)
 			}
 		}
@@ -233,21 +240,20 @@ func (vs *ValidationService) checkPermissions(ctx context.Context, db *sql.DB) e
 	return nil
 }
 
-func (vs *ValidationService) checkDiskSpace(ctx context.Context, db *sql.DB, migration *databasev1alpha1.DatabaseMigration) error {
+func (vs *ValidationService) checkDiskSpace(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) {
 	if migration.Spec.Validation == nil || migration.Spec.Validation.PreChecks == nil {
-		return nil
+		return
 	}
 
 	for _, check := range migration.Spec.Validation.PreChecks {
 		if check.Type == "disk-space" && check.Threshold != "" {
 			// This is a simplified check - in production you'd query actual disk usage
 			// For now, we'll assume sufficient space
-			log := log.FromContext(ctx)
-			log.V(1).Info("Disk space check passed", "threshold", check.Threshold)
+			logger := log.FromContext(ctx)
+			logger.V(1).Info("Disk space check passed", "threshold", check.Threshold)
+			return
 		}
 	}
-
-	return nil
 }
 
 func (vs *ValidationService) checkTableExistence(ctx context.Context, db *sql.DB, migration *databasev1alpha1.DatabaseMigration) error {
@@ -282,14 +288,14 @@ func (vs *ValidationService) checkDataSize(ctx context.Context, db *sql.DB, migr
 		}
 
 		// Log data size for monitoring
-		log := log.FromContext(ctx)
-		log.V(1).Info("Table data size", "table", table, "rows", rowCount)
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Table data size", "table", table, "rows", rowCount)
 	}
 
 	return nil
 }
 
-func (vs *ValidationService) checkPerformanceBaseline(ctx context.Context, db *sql.DB, migration *databasev1alpha1.DatabaseMigration) error {
+func (vs *ValidationService) checkPerformanceBaseline(ctx context.Context, db *sql.DB) error {
 	// Run a simple performance test
 	start := time.Now()
 
@@ -304,8 +310,8 @@ func (vs *ValidationService) checkPerformanceBaseline(ctx context.Context, db *s
 	duration := time.Since(start)
 	avgDuration := duration / 10
 
-	log := log.FromContext(ctx)
-	log.V(1).Info("Performance baseline", "avgQueryTime", avgDuration)
+	logger := log.FromContext(ctx)
+	logger.V(1).Info("Performance baseline", "avgQueryTime", avgDuration)
 
 	return nil
 }
@@ -322,8 +328,8 @@ func (vs *ValidationService) compareUsage(current, threshold, resourceType strin
 			// Both are percentages
 		} else {
 			// For now, just log a warning
-			log := log.FromContext(context.Background())
-			log.V(1).Info("Usage units differ, skipping comparison",
+			logger := log.FromContext(context.Background())
+			logger.V(1).Info("Usage units differ, skipping comparison",
 				"current", current, "threshold", threshold, "resource", resourceType)
 			return nil
 		}
@@ -375,8 +381,8 @@ func (vs *ValidationService) extractTableNames(scripts []databasev1alpha1.Migrat
 		scriptContent, err := vs.loadScriptContent(context.Background(), script)
 		if err != nil {
 			// Log error but continue with other scripts
-			log := log.FromContext(context.Background())
-			log.V(1).Info("Failed to load script content", "script", script.Name, "error", err)
+			logger := log.FromContext(context.Background())
+			logger.V(1).Info("Failed to load script content", "script", script.Name, "error", err)
 			continue
 		}
 
@@ -404,10 +410,10 @@ func (vs *ValidationService) loadScriptContent(ctx context.Context, script datab
 	case strings.HasPrefix(script.Source, "secret://"):
 		return vs.loadFromSecret(ctx, script)
 	case strings.HasPrefix(script.Source, "inline://"):
-		return vs.loadInline(ctx, script)
+		return vs.loadInline(script)
 	case script.Source == "":
 		// Fallback to inline content if no source specified
-		return vs.loadInline(ctx, script)
+		return vs.loadInline(script)
 	default:
 		return "", fmt.Errorf("unsupported script source: %s", script.Source)
 	}
@@ -470,7 +476,7 @@ func (vs *ValidationService) loadFromSecret(ctx context.Context, script database
 }
 
 // loadInline loads inline script content
-func (vs *ValidationService) loadInline(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
+func (vs *ValidationService) loadInline(script databasev1alpha1.MigrationScript) (string, error) {
 	// For inline content, we'll use the script name as a template
 	// In a real implementation, this might come from the script spec
 	switch script.Type {
@@ -562,13 +568,13 @@ func (vs *ValidationService) isSQLKeyword(word string) bool {
 	return keywords[strings.ToLower(word)]
 }
 
-func (vs *ValidationService) checkCustomCondition(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, metrics *databasev1alpha1.MigrationMetrics, condition string) bool {
+func (vs *ValidationService) checkCustomCondition(metrics *databasev1alpha1.MigrationMetrics, condition string) bool {
 	// Implement custom condition checking logic
 	// This is a placeholder - in production you'd have more sophisticated condition evaluation
 	switch condition {
 	case "high-error-rate":
 		// Check if there are any error indicators in metrics
-		return metrics != nil && (metrics.CPUUsage == "100%" || metrics.MemoryUsage == "100%")
+		return metrics != nil && (metrics.CPUUsage == HundredPercent || metrics.MemoryUsage == HundredPercent)
 	case "slow-queries":
 		// Check if queries per second is very low
 		return metrics != nil && metrics.QueriesPerSecond == "0"

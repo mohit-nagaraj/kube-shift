@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	databasev1alpha1 "github.com/mohit-nagaraj/kube-shift/api/v1alpha1"
 	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
@@ -39,7 +40,11 @@ func (e *Engine) ValidateConnection(ctx context.Context, config databasev1alpha1
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			log.FromContext(ctx).Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Test the connection
 	if err := db.PingContext(ctx); err != nil {
@@ -246,12 +251,16 @@ func (e *Engine) SwapTables(ctx context.Context, db *sql.DB, migration *database
 
 	backupTableName := fmt.Sprintf("%s_backup_%d", originalTable, time.Now().Unix())
 
-	// Start transaction for atomic swap
+	// Begin transaction
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to start transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			log.FromContext(ctx).Error(rollbackErr, "Failed to rollback transaction")
+		}
+	}()
 
 	// Rename original table to backup
 	renameOriginalQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", originalTable, backupTableName)
@@ -293,12 +302,16 @@ func (e *Engine) Rollback(ctx context.Context, db *sql.DB, migration *databasev1
 	backupTableName := migration.Status.BackupInfo.Location
 	currentTableName := fmt.Sprintf("%s_failed_%d", originalTable, time.Now().Unix())
 
-	// Start transaction for atomic rollback
+	// Begin transaction
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to start rollback transaction: %w", err)
+		return fmt.Errorf("failed to begin rollback transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			log.FromContext(ctx).Error(rollbackErr, "Failed to rollback transaction")
+		}
+	}()
 
 	// Rename current table (failed migration)
 	renameCurrentQuery := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", originalTable, currentTableName)

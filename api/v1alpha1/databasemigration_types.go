@@ -395,14 +395,14 @@ type DatabaseMigrationStatus struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
-//+kubebuilder:resource:scope=Namespaced
-//+kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
-//+kubebuilder:printcolumn:name="Strategy",type="string",JSONPath=".spec.migration.strategy"
-//+kubebuilder:printcolumn:name="Database",type="string",JSONPath=".spec.database.type"
-//+kubebuilder:printcolumn:name="Progress",type="string",JSONPath=".status.progress.percentageComplete"
-//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Strategy",type="string",JSONPath=".spec.migration.strategy"
+// +kubebuilder:printcolumn:name="Database",type="string",JSONPath=".spec.database.type"
+// +kubebuilder:printcolumn:name="Progress",type="string",JSONPath=".status.progress.percentageComplete"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // DatabaseMigration is the Schema for the databasemigrations API
 type DatabaseMigration struct {
@@ -413,7 +413,7 @@ type DatabaseMigration struct {
 	Status DatabaseMigrationStatus `json:"status,omitempty"`
 }
 
-//+kubebuilder:object:root=true
+// +kubebuilder:object:root=true
 
 // DatabaseMigrationList contains a list of DatabaseMigration
 type DatabaseMigrationList struct {

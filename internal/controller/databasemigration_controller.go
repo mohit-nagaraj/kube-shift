@@ -63,26 +63,32 @@ type DatabaseMigrationReconciler struct {
 // Finalizer name for cleanup
 const DatabaseMigrationFinalizer = "database.mohitnagaraj.in/finalizer"
 
-//+kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations/finalizers,verbs=update
-//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// Status constants
+const (
+	MigrationCompletedReason = "MigrationCompleted"
+	CompletedStep            = "completed"
+)
+
+// +kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=database.mohitnagaraj.in,resources=databasemigrations/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *DatabaseMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx).WithValues("databasemigration", req.NamespacedName)
+	logger := log.FromContext(ctx).WithValues("databasemigration", req.NamespacedName)
 
 	// Fetch the DatabaseMigration instance
 	migration := &databasev1alpha1.DatabaseMigration{}
 	if err := r.Get(ctx, req.NamespacedName, migration); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
-			log.Info("DatabaseMigration resource not found. Ignoring since object must be deleted")
+			logger.Info("DatabaseMigration resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get DatabaseMigration")
+		logger.Error(err, "Failed to get DatabaseMigration")
 		return ctrl.Result{}, err
 	}
 
@@ -95,7 +101,7 @@ func (r *DatabaseMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !controllerutil.ContainsFinalizer(migration, DatabaseMigrationFinalizer) {
 		controllerutil.AddFinalizer(migration, DatabaseMigrationFinalizer)
 		if err := r.Update(ctx, migration); err != nil {
-			log.Error(err, "Failed to add finalizer")
+			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -107,7 +113,7 @@ func (r *DatabaseMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // handleMigrationPhase handles migration based on current phase
 func (r *DatabaseMigrationReconciler) handleMigrationPhase(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	switch migration.Status.Phase {
 	case "":
@@ -124,18 +130,18 @@ func (r *DatabaseMigrationReconciler) handleMigrationPhase(ctx context.Context, 
 		return r.handleRollback(ctx, migration)
 	case databasev1alpha1.MigrationPhaseSucceeded, databasev1alpha1.MigrationPhaseFailed:
 		// Migration completed, just monitor
-		log.Info("Migration completed", "phase", migration.Status.Phase)
+		logger.Info("Migration completed", "phase", migration.Status.Phase)
 		return ctrl.Result{}, nil
 	default:
-		log.Info("Unknown migration phase", "phase", migration.Status.Phase)
+		logger.Info("Unknown migration phase", "phase", migration.Status.Phase)
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 }
 
 // initializeMigration sets up the migration
 func (r *DatabaseMigrationReconciler) initializeMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Initializing migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Initializing migration")
 
 	// Update status to pending
 	migration.Status.Phase = databasev1alpha1.MigrationPhasePending
@@ -152,10 +158,10 @@ func (r *DatabaseMigrationReconciler) initializeMigration(ctx context.Context, m
 	}
 
 	// Set initial condition
-	r.setCondition(migration, "Initialized", metav1.ConditionTrue, "InitializationComplete", "Migration initialized successfully")
+	r.setCondition(migration, "Initialized", "InitializationComplete", "Migration initialized successfully")
 
 	if err := r.Status().Update(ctx, migration); err != nil {
-		log.Error(err, "Failed to update migration status during initialization")
+		logger.Error(err, "Failed to update migration status during initialization")
 		return ctrl.Result{}, err
 	}
 
@@ -167,7 +173,7 @@ func (r *DatabaseMigrationReconciler) initializeMigration(ctx context.Context, m
 	// Send notification
 	if r.NotificationService != nil && migration.Spec.Notifications != nil {
 		if err := r.NotificationService.SendMigrationStarted(ctx, migration); err != nil {
-			log.Error(err, "Failed to send migration started notification")
+			logger.Error(err, "Failed to send migration started notification")
 			// Don't fail the migration for notification errors
 		}
 	}
@@ -177,8 +183,8 @@ func (r *DatabaseMigrationReconciler) initializeMigration(ctx context.Context, m
 
 // startMigration begins the migration process
 func (r *DatabaseMigrationReconciler) startMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Starting migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Starting migration")
 
 	// Run pre-checks
 	if r.ValidationService != nil {
@@ -203,10 +209,10 @@ func (r *DatabaseMigrationReconciler) startMigration(ctx context.Context, migrat
 	migration.Status.Progress.CurrentStep = "running-migration"
 	migration.Status.Progress.CompletedSteps = 1
 
-	r.setCondition(migration, "Running", metav1.ConditionTrue, "MigrationStarted", "Migration execution started")
+	r.setCondition(migration, "Running", "MigrationStarted", "Migration execution started")
 
 	if err := r.Status().Update(ctx, migration); err != nil {
-		log.Error(err, "Failed to update migration status")
+		logger.Error(err, "Failed to update migration status")
 		return ctrl.Result{}, err
 	}
 
@@ -215,8 +221,8 @@ func (r *DatabaseMigrationReconciler) startMigration(ctx context.Context, migrat
 
 // continueMigration continues the migration execution
 func (r *DatabaseMigrationReconciler) continueMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Continuing migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Continuing migration")
 
 	// Get the appropriate migration engine
 	engine, err := r.getMigrationEngine(migration.Spec.Database.Type)
@@ -239,8 +245,8 @@ func (r *DatabaseMigrationReconciler) continueMigration(ctx context.Context, mig
 
 // handleRollback handles migration rollback
 func (r *DatabaseMigrationReconciler) handleRollback(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Handling migration rollback")
+	logger := log.FromContext(ctx)
+	logger.Info("Handling migration rollback")
 
 	engine, err := r.getMigrationEngine(migration.Spec.Database.Type)
 	if err != nil {
@@ -252,32 +258,36 @@ func (r *DatabaseMigrationReconciler) handleRollback(ctx context.Context, migrat
 	if err != nil {
 		return r.handleMigrationError(ctx, migration, fmt.Errorf("failed to get database connection for rollback: %w", err))
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Perform rollback
 	if err := engine.Rollback(ctx, db, migration); err != nil {
 		migration.Status.Phase = databasev1alpha1.MigrationPhaseFailed
 		migration.Status.Message = fmt.Sprintf("Rollback failed: %v", err)
 		migration.Status.Reason = "RollbackFailed"
-		r.setCondition(migration, "Failed", metav1.ConditionTrue, "RollbackFailed", fmt.Sprintf("Rollback failed: %v", err))
+		r.setCondition(migration, "Failed", "RollbackFailed", err.Error())
 	} else {
 		migration.Status.Phase = databasev1alpha1.MigrationPhaseFailed
 		migration.Status.Message = "Migration rolled back successfully"
 		migration.Status.Reason = "RollbackCompleted"
-		r.setCondition(migration, "RolledBack", metav1.ConditionTrue, "RollbackCompleted", "Migration rolled back successfully")
+		r.setCondition(migration, "RolledBack", "RollbackCompleted", "Migration rolled back successfully")
 	}
 
 	migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 
 	if err := r.Status().Update(ctx, migration); err != nil {
-		log.Error(err, "Failed to update migration status after rollback")
+		logger.Error(err, "Failed to update migration status after rollback")
 		return ctrl.Result{}, err
 	}
 
 	// Send notification
 	if r.NotificationService != nil && migration.Spec.Notifications != nil {
 		if err := r.NotificationService.SendRollbackStarted(ctx, migration); err != nil {
-			log.Error(err, "Failed to send rollback notification")
+			logger.Error(err, "Failed to send rollback notification")
 		}
 	}
 
@@ -286,24 +296,28 @@ func (r *DatabaseMigrationReconciler) handleRollback(ctx context.Context, migrat
 
 // handleDeletion handles migration resource deletion
 func (r *DatabaseMigrationReconciler) handleDeletion(ctx context.Context, migration *databasev1alpha1.DatabaseMigration) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Handling migration deletion")
+	logger := log.FromContext(ctx)
+	logger.Info("Handling migration deletion")
 
 	// Perform cleanup if migration is in progress
 	if migration.Status.Phase == databasev1alpha1.MigrationPhaseRunning {
-		log.Info("Migration is running, performing cleanup before deletion")
+		logger.Info("Migration is running, performing cleanup before deletion")
 
 		engine, err := r.getMigrationEngine(migration.Spec.Database.Type)
 		if err != nil {
-			log.Error(err, "Failed to get migration engine for cleanup")
+			logger.Error(err, "Failed to get migration engine for cleanup")
 		} else {
 			db, err := r.getDatabaseConnection(ctx, migration)
 			if err != nil {
-				log.Error(err, "Failed to get database connection for cleanup")
+				logger.Error(err, "Failed to get database connection for cleanup")
 			} else {
-				defer db.Close()
+				defer func() {
+					if closeErr := db.Close(); closeErr != nil {
+						logger.Error(closeErr, "Failed to close database connection")
+					}
+				}()
 				if err := engine.Rollback(ctx, db, migration); err != nil {
-					log.Error(err, "Failed to rollback during cleanup")
+					logger.Error(err, "Failed to rollback during cleanup")
 				}
 			}
 		}
@@ -312,7 +326,7 @@ func (r *DatabaseMigrationReconciler) handleDeletion(ctx context.Context, migrat
 	// Remove finalizer
 	controllerutil.RemoveFinalizer(migration, DatabaseMigrationFinalizer)
 	if err := r.Update(ctx, migration); err != nil {
-		log.Error(err, "Failed to remove finalizer")
+		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
 
@@ -373,14 +387,18 @@ func (r *DatabaseMigrationReconciler) getDatabaseConnection(ctx context.Context,
 
 // executeShadowTableMigration executes shadow table migration strategy
 func (r *DatabaseMigrationReconciler) executeShadowTableMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, engine interfaces.MigrationEngine) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Executing shadow table migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Executing shadow table migration")
 
 	db, err := r.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return r.handleMigrationError(ctx, migration, fmt.Errorf("failed to get database connection: %w", err))
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Initialize shadow table info if not present
 	if migration.Status.ShadowTable == nil {
@@ -416,7 +434,7 @@ func (r *DatabaseMigrationReconciler) executeShadowTableMigration(ctx context.Co
 		// Get current metrics to check progress
 		metrics, err := engine.GetMetrics(ctx, db, migration)
 		if err != nil {
-			log.Error(err, "Failed to get migration metrics")
+			logger.Error(err, "Failed to get migration metrics")
 		} else {
 			migration.Status.Metrics = metrics
 		}
@@ -457,13 +475,13 @@ func (r *DatabaseMigrationReconciler) executeShadowTableMigration(ctx context.Co
 		// Migration successful
 		migration.Status.Phase = databasev1alpha1.MigrationPhaseSucceeded
 		migration.Status.Message = "Migration completed successfully"
-		migration.Status.Reason = "MigrationCompleted"
+		migration.Status.Reason = MigrationCompletedReason
 		migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 		migration.Status.Progress.CompletedSteps = migration.Status.Progress.TotalSteps
 		migration.Status.Progress.PercentageComplete = 100
-		migration.Status.Progress.CurrentStep = "completed"
+		migration.Status.Progress.CurrentStep = CompletedStep
 
-		r.setCondition(migration, "Succeeded", metav1.ConditionTrue, "MigrationCompleted", "Migration completed successfully")
+		r.setCondition(migration, "Succeeded", "MigrationCompleted", "Migration completed successfully")
 
 		if err := r.Status().Update(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -472,7 +490,7 @@ func (r *DatabaseMigrationReconciler) executeShadowTableMigration(ctx context.Co
 		// Send completion notification
 		if r.NotificationService != nil && migration.Spec.Notifications != nil {
 			if err := r.NotificationService.SendMigrationCompleted(ctx, migration); err != nil {
-				log.Error(err, "Failed to send migration completion notification")
+				logger.Error(err, "Failed to send migration completion notification")
 			}
 		}
 
@@ -488,15 +506,21 @@ func (r *DatabaseMigrationReconciler) executeShadowTableMigration(ctx context.Co
 }
 
 // executeBlueGreenMigration executes blue-green migration strategy
+//
+//nolint:gocyclo // complexity is expected here due to migration logic
 func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, engine interfaces.MigrationEngine) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Executing blue-green migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Executing blue-green migration")
 
 	db, err := r.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return r.handleMigrationError(ctx, migration, fmt.Errorf("failed to get database connection: %w", err))
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Initialize blue-green status if not present
 	if migration.Status.BlueGreen == nil {
@@ -508,7 +532,7 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 	switch migration.Status.BlueGreen.Phase {
 	case "CreatingGreen", "":
 		// Step 1: Create green database copy
-		log.Info("Creating green database copy")
+		logger.Info("Creating green database copy")
 
 		// Create a complete copy of the database
 		greenDBName := fmt.Sprintf("%s_green_%d", migration.Spec.Database.Database, time.Now().Unix())
@@ -525,7 +549,11 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 		if err != nil {
 			return r.handleMigrationError(ctx, migration, fmt.Errorf("failed to get tables: %w", err))
 		}
-		defer rows.Close()
+		defer func() {
+			if closeErr := rows.Close(); closeErr != nil {
+				logger.Error(closeErr, "Failed to close database rows")
+			}
+		}()
 
 		var tables []string
 		for rows.Next() {
@@ -565,7 +593,7 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 
 	case "ApplyingMigrations":
 		// Step 2: Apply migrations to green database
-		log.Info("Applying migrations to green database")
+		logger.Info("Applying migrations to green database")
 
 		// Switch to green database context
 		greenDBName := migration.Status.BlueGreen.GreenDatabase
@@ -615,7 +643,7 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 
 	case "ValidatingGreen":
 		// Step 3: Validate green database
-		log.Info("Validating green database")
+		logger.Info("Validating green database")
 
 		// Validate data integrity
 		if err := engine.ValidateDataIntegrity(ctx, db, migration); err != nil {
@@ -635,7 +663,7 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 
 	case "SwitchingTraffic":
 		// Step 4: Switch traffic to green database
-		log.Info("Switching traffic to green database")
+		logger.Info("Switching traffic to green database")
 
 		// In a real implementation, this would involve:
 		// 1. Updating service endpoints
@@ -647,13 +675,13 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 		migration.Status.BlueGreen.Phase = "Completed"
 		migration.Status.Phase = databasev1alpha1.MigrationPhaseSucceeded
 		migration.Status.Message = "Blue-green migration completed successfully"
-		migration.Status.Reason = "MigrationCompleted"
+		migration.Status.Reason = MigrationCompletedReason
 		migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 		migration.Status.Progress.CompletedSteps = migration.Status.Progress.TotalSteps
 		migration.Status.Progress.PercentageComplete = 100
-		migration.Status.Progress.CurrentStep = "completed"
+		migration.Status.Progress.CurrentStep = CompletedStep
 
-		r.setCondition(migration, "Succeeded", metav1.ConditionTrue, "MigrationCompleted", "Blue-green migration completed successfully")
+		r.setCondition(migration, "Succeeded", "MigrationCompleted", "Blue-green migration completed successfully")
 
 		if err := r.Status().Update(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -662,7 +690,7 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 		// Send completion notification
 		if r.NotificationService != nil && migration.Spec.Notifications != nil {
 			if err := r.NotificationService.SendMigrationCompleted(ctx, migration); err != nil {
-				log.Error(err, "Failed to send migration completion notification")
+				logger.Error(err, "Failed to send migration completion notification")
 			}
 		}
 
@@ -679,14 +707,18 @@ func (r *DatabaseMigrationReconciler) executeBlueGreenMigration(ctx context.Cont
 
 // executeRollingMigration executes rolling migration strategy
 func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, engine interfaces.MigrationEngine) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Executing rolling migration")
+	logger := log.FromContext(ctx)
+	logger.Info("Executing rolling migration")
 
 	db, err := r.getDatabaseConnection(ctx, migration)
 	if err != nil {
 		return r.handleMigrationError(ctx, migration, fmt.Errorf("failed to get database connection: %w", err))
 	}
-	defer db.Close()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error(closeErr, "Failed to close database connection")
+		}
+	}()
 
 	// Initialize rolling status if not present
 	if migration.Status.Rolling == nil {
@@ -699,7 +731,7 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 	switch migration.Status.Rolling.Phase {
 	case "Preparing", "":
 		// Step 1: Prepare for rolling migration
-		log.Info("Preparing for rolling migration")
+		logger.Info("Preparing for rolling migration")
 
 		// Get total number of migration steps
 		totalSteps := len(migration.Spec.Migration.Scripts)
@@ -719,7 +751,7 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 
 	case "Executing":
 		// Step 2: Execute migrations one by one
-		log.Info("Executing rolling migration step", "currentStep", migration.Status.Rolling.CurrentStep)
+		logger.Info("Executing rolling migration step", "currentStep", migration.Status.Rolling.CurrentStep)
 
 		currentStep := int(migration.Status.Rolling.CurrentStep)
 		if currentStep >= len(migration.Spec.Migration.Scripts) {
@@ -763,7 +795,7 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 		// Get current metrics
 		metrics, err := engine.GetMetrics(ctx, db, migration)
 		if err != nil {
-			log.Error(err, "Failed to get migration metrics")
+			logger.Error(err, "Failed to get migration metrics")
 		} else {
 			migration.Status.Metrics = metrics
 		}
@@ -776,7 +808,7 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 
 	case "Validating":
 		// Step 3: Validate the migration
-		log.Info("Validating rolling migration")
+		logger.Info("Validating rolling migration")
 
 		// Validate data integrity
 		if err := engine.ValidateDataIntegrity(ctx, db, migration); err != nil {
@@ -787,13 +819,13 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 		migration.Status.Rolling.Phase = "Completed"
 		migration.Status.Phase = databasev1alpha1.MigrationPhaseSucceeded
 		migration.Status.Message = "Rolling migration completed successfully"
-		migration.Status.Reason = "MigrationCompleted"
+		migration.Status.Reason = MigrationCompletedReason
 		migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 		migration.Status.Progress.CompletedSteps = migration.Status.Progress.TotalSteps
 		migration.Status.Progress.PercentageComplete = 100
-		migration.Status.Progress.CurrentStep = "completed"
+		migration.Status.Progress.CurrentStep = CompletedStep
 
-		r.setCondition(migration, "Succeeded", metav1.ConditionTrue, "MigrationCompleted", "Rolling migration completed successfully")
+		r.setCondition(migration, "Succeeded", "MigrationCompleted", "Rolling migration completed successfully")
 
 		if err := r.Status().Update(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -802,7 +834,7 @@ func (r *DatabaseMigrationReconciler) executeRollingMigration(ctx context.Contex
 		// Send completion notification
 		if r.NotificationService != nil && migration.Spec.Notifications != nil {
 			if err := r.NotificationService.SendMigrationCompleted(ctx, migration); err != nil {
-				log.Error(err, "Failed to send migration completion notification")
+				logger.Error(err, "Failed to send migration completion notification")
 			}
 		}
 
@@ -828,8 +860,8 @@ func (r *DatabaseMigrationReconciler) createBackup(ctx context.Context, migratio
 
 // handleMigrationError handles migration errors and updates status
 func (r *DatabaseMigrationReconciler) handleMigrationError(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, err error) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Error(err, "Migration error occurred")
+	logger := log.FromContext(ctx)
+	logger.Error(err, "Migration error occurred")
 
 	// Check if automatic rollback is enabled
 	if migration.Spec.Rollback != nil && migration.Spec.Rollback.Automatic {
@@ -837,10 +869,10 @@ func (r *DatabaseMigrationReconciler) handleMigrationError(ctx context.Context, 
 		migration.Status.Message = fmt.Sprintf("Starting automatic rollback due to error: %v", err)
 		migration.Status.Reason = "AutomaticRollback"
 
-		r.setCondition(migration, "RollingBack", metav1.ConditionTrue, "AutomaticRollback", migration.Status.Message)
+		r.setCondition(migration, "RollingBack", "RollbackStarted", "Automatic rollback started due to failure")
 
 		if updateErr := r.Status().Update(ctx, migration); updateErr != nil {
-			log.Error(updateErr, "Failed to update status for rollback")
+			logger.Error(updateErr, "Failed to update status for rollback")
 			return ctrl.Result{}, updateErr
 		}
 
@@ -853,17 +885,17 @@ func (r *DatabaseMigrationReconciler) handleMigrationError(ctx context.Context, 
 	migration.Status.Reason = "MigrationFailed"
 	migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 
-	r.setCondition(migration, "Failed", metav1.ConditionTrue, "MigrationFailed", migration.Status.Message)
+	r.setCondition(migration, "Failed", "MigrationFailed", err.Error())
 
 	if updateErr := r.Status().Update(ctx, migration); updateErr != nil {
-		log.Error(updateErr, "Failed to update migration status")
+		logger.Error(updateErr, "Failed to update migration status")
 		return ctrl.Result{}, updateErr
 	}
 
 	// Send failure notification
 	if r.NotificationService != nil && migration.Spec.Notifications != nil {
 		if notifyErr := r.NotificationService.SendMigrationFailed(ctx, migration, err); notifyErr != nil {
-			log.Error(notifyErr, "Failed to send migration failure notification")
+			logger.Error(notifyErr, "Failed to send migration failure notification")
 		}
 	}
 
@@ -877,19 +909,19 @@ func (r *DatabaseMigrationReconciler) handleMigrationError(ctx context.Context, 
 }
 
 // setCondition sets a condition on the migration status
-func (r *DatabaseMigrationReconciler) setCondition(migration *databasev1alpha1.DatabaseMigration, conditionType string, status metav1.ConditionStatus, reason, message string) {
+func (r *DatabaseMigrationReconciler) setCondition(migration *databasev1alpha1.DatabaseMigration, conditionType, reason, message string) {
 	condition := metav1.Condition{
 		Type:               conditionType,
-		Status:             status,
+		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: metav1.Now(),
 	}
 
-	// Find existing condition and update it
+	// Update existing condition if it exists
 	for i, existingCondition := range migration.Status.Conditions {
 		if existingCondition.Type == conditionType {
-			if existingCondition.Status != status ||
+			if existingCondition.Status != metav1.ConditionTrue ||
 				existingCondition.Reason != reason ||
 				existingCondition.Message != message {
 				migration.Status.Conditions[i] = condition
@@ -911,16 +943,16 @@ func (r *DatabaseMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // NewDatabaseMigrationReconciler creates a new DatabaseMigrationReconciler
-func NewDatabaseMigrationReconciler(client client.Client, scheme *runtime.Scheme) *DatabaseMigrationReconciler {
+func NewDatabaseMigrationReconciler(k8sClient client.Client, scheme *runtime.Scheme) *DatabaseMigrationReconciler {
 	// Create services first
-	scriptLoader := services.NewScriptLoader(client)
+	scriptLoader := services.NewScriptLoader(k8sClient)
 	metricsCollector := services.NewMetricsCollector()
-	notificationService := services.NewNotificationService(client)
-	backupService := services.NewBackupService(client)
-	validationService := services.NewValidationService(client)
+	notificationService := services.NewNotificationService(k8sClient)
+	backupService := services.NewBackupService(k8sClient)
+	validationService := services.NewValidationService(k8sClient)
 
 	return &DatabaseMigrationReconciler{
-		Client:              client,
+		Client:              k8sClient,
 		Scheme:              scheme,
 		PostgreSQLEngine:    postgresql.NewEngineWithScriptLoader(scriptLoader),
 		MySQLEngine:         mysql.NewEngineWithScriptLoader(scriptLoader),
