@@ -202,10 +202,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.DatabaseMigrationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	if err := controller.NewDatabaseMigrationReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DatabaseMigration")
 		os.Exit(1)
 	}

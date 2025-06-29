@@ -34,7 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	databasev1alpha1 "github.com/mohit-nagaraj/kube-shift/api/v1alpha1"
+	"github.com/mohit-nagaraj/kube-shift/internal/engines/mariadb"
+	"github.com/mohit-nagaraj/kube-shift/internal/engines/mysql"
+	"github.com/mohit-nagaraj/kube-shift/internal/engines/postgresql"
 	"github.com/mohit-nagaraj/kube-shift/internal/interfaces"
+	"github.com/mohit-nagaraj/kube-shift/internal/services"
 )
 
 // DatabaseMigrationReconciler reconciles a DatabaseMigration object
@@ -904,4 +908,20 @@ func (r *DatabaseMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&databasev1alpha1.DatabaseMigration{}).
 		Named("databasemigration").
 		Complete(r)
+}
+
+// NewDatabaseMigrationReconciler creates a new DatabaseMigrationReconciler
+func NewDatabaseMigrationReconciler(client client.Client, scheme *runtime.Scheme) *DatabaseMigrationReconciler {
+	return &DatabaseMigrationReconciler{
+		Client:              client,
+		Scheme:              scheme,
+		PostgreSQLEngine:    postgresql.NewEngine(),
+		MySQLEngine:         mysql.NewEngine(),
+		MariaDBEngine:       mariadb.NewEngine(),
+		MetricsCollector:    services.NewMetricsCollector(),
+		NotificationService: services.NewNotificationService(client),
+		BackupService:       services.NewBackupService(client),
+		ScriptLoader:        services.NewScriptLoader(client),
+		ValidationService:   services.NewValidationService(client),
+	}
 }
