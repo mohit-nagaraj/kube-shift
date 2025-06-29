@@ -305,7 +305,7 @@ type MigrationMetrics struct {
 	DiskUsage string `json:"diskUsage,omitempty"`
 
 	// QueriesPerSecond during migration
-	QueriesPerSecond float64 `json:"queriesPerSecond,omitempty"`
+	QueriesPerSecond string `json:"queriesPerSecond,omitempty"`
 }
 
 // BackupInfo holds backup information

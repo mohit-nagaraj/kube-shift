@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 

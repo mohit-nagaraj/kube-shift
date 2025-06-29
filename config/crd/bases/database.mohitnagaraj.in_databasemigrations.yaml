@@ -367,6 +367,7 @@ spec:
                     type: string
                   queriesPerSecond:
                     description: QueriesPerSecond during migration
+                    type: string
                 type: object
               phase:
                 description: Phase of the migration
