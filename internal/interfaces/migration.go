@@ -82,10 +82,10 @@ type BackupService interface {
 	RestoreBackup(ctx context.Context, migration *databasev1alpha1.DatabaseMigration, backupInfo *databasev1alpha1.BackupInfo) error
 
 	// DeleteBackup removes a backup
-	DeleteBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo) error
+	DeleteBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo, migration *databasev1alpha1.DatabaseMigration) error
 
 	// ValidateBackup checks if a backup is valid
-	ValidateBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo) error
+	ValidateBackup(ctx context.Context, backupInfo *databasev1alpha1.BackupInfo, migration *databasev1alpha1.DatabaseMigration) error
 }
 
 // ScriptLoader defines the interface for loading migration scripts
