@@ -912,16 +912,23 @@ func (r *DatabaseMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // NewDatabaseMigrationReconciler creates a new DatabaseMigrationReconciler
 func NewDatabaseMigrationReconciler(client client.Client, scheme *runtime.Scheme) *DatabaseMigrationReconciler {
+	// Create services first
+	scriptLoader := services.NewScriptLoader(client)
+	metricsCollector := services.NewMetricsCollector()
+	notificationService := services.NewNotificationService(client)
+	backupService := services.NewBackupService(client)
+	validationService := services.NewValidationService(client)
+
 	return &DatabaseMigrationReconciler{
 		Client:              client,
 		Scheme:              scheme,
-		PostgreSQLEngine:    postgresql.NewEngine(),
-		MySQLEngine:         mysql.NewEngine(),
-		MariaDBEngine:       mariadb.NewEngine(),
-		MetricsCollector:    services.NewMetricsCollector(),
-		NotificationService: services.NewNotificationService(client),
-		BackupService:       services.NewBackupService(client),
-		ScriptLoader:        services.NewScriptLoader(client),
-		ValidationService:   services.NewValidationService(client),
+		PostgreSQLEngine:    postgresql.NewEngineWithScriptLoader(scriptLoader),
+		MySQLEngine:         mysql.NewEngineWithScriptLoader(scriptLoader),
+		MariaDBEngine:       mariadb.NewEngineWithScriptLoader(scriptLoader),
+		MetricsCollector:    metricsCollector,
+		NotificationService: notificationService,
+		BackupService:       backupService,
+		ScriptLoader:        scriptLoader,
+		ValidationService:   validationService,
 	}
 }

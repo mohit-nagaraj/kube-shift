@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io/ioutil"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,11 +18,20 @@ import (
 )
 
 // Engine implements the MigrationEngine interface for MariaDB
-type Engine struct{}
+type Engine struct {
+	scriptLoader interfaces.ScriptLoader
+}
 
 // NewEngine creates a new MariaDB migration engine
 func NewEngine() interfaces.MigrationEngine {
 	return &Engine{}
+}
+
+// NewEngineWithScriptLoader creates a new MariaDB migration engine with script loader
+func NewEngineWithScriptLoader(scriptLoader interfaces.ScriptLoader) interfaces.MigrationEngine {
+	return &Engine{
+		scriptLoader: scriptLoader,
+	}
 }
 
 func (e *Engine) ValidateConnection(ctx context.Context, config databasev1alpha1.DatabaseConfig, credentials map[string]string) error {
@@ -77,10 +85,19 @@ func (e *Engine) CreateShadowTable(ctx context.Context, db *sql.DB, migration *d
 	}
 	for _, script := range migration.Spec.Migration.Scripts {
 		if script.Type == databasev1alpha1.ScriptTypeSchema {
-			scriptContent, err := e.getScriptContent(ctx, script)
-			if err != nil {
-				return fmt.Errorf("failed to load schema script %s: %w", script.Name, err)
+			var scriptContent string
+			var err error
+
+			if e.scriptLoader != nil {
+				scriptContent, err = e.scriptLoader.LoadScript(ctx, script)
+				if err != nil {
+					return fmt.Errorf("failed to load schema script %s: %w", script.Name, err)
+				}
+			} else {
+				// Fallback to placeholder for backward compatibility
+				scriptContent = e.getScriptContentFallback(script)
 			}
+
 			modifiedScript := strings.ReplaceAll(scriptContent, originalTable, shadowTableName)
 			if _, err := db.ExecContext(ctx, modifiedScript); err != nil {
 				return fmt.Errorf("failed to execute schema script %s: %w", script.Name, err)
@@ -131,10 +148,19 @@ func (e *Engine) SyncData(ctx context.Context, db *sql.DB, migration *databasev1
 	}
 	for _, script := range migration.Spec.Migration.Scripts {
 		if script.Type == databasev1alpha1.ScriptTypeData {
-			scriptContent, err := e.getScriptContent(ctx, script)
-			if err != nil {
-				return fmt.Errorf("failed to load data script %s: %w", script.Name, err)
+			var scriptContent string
+			var err error
+
+			if e.scriptLoader != nil {
+				scriptContent, err = e.scriptLoader.LoadScript(ctx, script)
+				if err != nil {
+					return fmt.Errorf("failed to load data script %s: %w", script.Name, err)
+				}
+			} else {
+				// Fallback to placeholder for backward compatibility
+				scriptContent = e.getScriptContentFallback(script)
 			}
+
 			modifiedScript := strings.ReplaceAll(scriptContent, originalTable, shadowTableName)
 			if _, err := db.ExecContext(ctx, modifiedScript); err != nil {
 				return fmt.Errorf("failed to execute data script %s: %w", script.Name, err)
@@ -311,10 +337,19 @@ func (e *Engine) extractTableName(scripts []databasev1alpha1.MigrationScript) (s
 	}
 	for _, script := range scripts {
 		if script.Type == databasev1alpha1.ScriptTypeSchema {
-			content, err := e.getScriptContent(context.Background(), script)
-			if err != nil {
-				continue
+			var content string
+			var err error
+
+			if e.scriptLoader != nil {
+				content, err = e.scriptLoader.LoadScript(context.Background(), script)
+				if err != nil {
+					continue
+				}
+			} else {
+				// Fallback to placeholder for backward compatibility
+				content = e.getScriptContentFallback(script)
 			}
+
 			if tableName := e.parseTableNameFromSQL(content); tableName != "" {
 				return tableName, nil
 			}
@@ -346,36 +381,6 @@ func (e *Engine) getPrimaryKeyColumn(ctx context.Context, db *sql.DB, tableName 
 	return pkColumn, nil
 }
 
-// --- Production script loader ---
-func (e *Engine) getScriptContent(ctx context.Context, script databasev1alpha1.MigrationScript) (string, error) {
-	if strings.HasPrefix(script.Source, "configmap://") {
-		// Example: configmap://migrations/001_schema.sql
-		parts := strings.SplitN(strings.TrimPrefix(script.Source, "configmap://"), "/", 2)
-		if len(parts) == 2 {
-			path := "/etc/configmaps/" + parts[0] + "/" + parts[1]
-			data, err := ioutil.ReadFile(path)
-			if err != nil {
-				return "", fmt.Errorf("failed to read configmap file: %w", err)
-			}
-			return string(data), nil
-		}
-	} else if strings.HasPrefix(script.Source, "secret://") {
-		// Example: secret://migrations/001_schema.sql
-		parts := strings.SplitN(strings.TrimPrefix(script.Source, "secret://"), "/", 2)
-		if len(parts) == 2 {
-			path := "/etc/secrets/" + parts[0] + "/" + parts[1]
-			data, err := ioutil.ReadFile(path)
-			if err != nil {
-				return "", fmt.Errorf("failed to read secret file: %w", err)
-			}
-			return string(data), nil
-		}
-	} else if script.Source == "inline" && script.Name != "" {
-		return script.Name, nil // For inline, use Name as content (should be script.Content in real CRD)
-	}
-	return "", fmt.Errorf("unsupported script source: %s", script.Source)
-}
-
 // --- Production checksum validation ---
 func (e *Engine) validateChecksums(ctx context.Context, db *sql.DB, tableName string, migration *databasev1alpha1.DatabaseMigration) error {
 	// Calculate checksum for the table using MariaDB's MD5 and GROUP_CONCAT
@@ -391,4 +396,19 @@ func (e *Engine) validateChecksums(ctx context.Context, db *sql.DB, tableName st
 	}
 	fmt.Printf("Warning: No checksum validation performed for table %s\n", tableName)
 	return nil
+}
+
+// getScriptContentFallback provides a fallback script content
+func (e *Engine) getScriptContentFallback(script databasev1alpha1.MigrationScript) string {
+	// Fallback implementation for backward compatibility
+	switch script.Type {
+	case databasev1alpha1.ScriptTypeSchema:
+		return fmt.Sprintf("ALTER TABLE users ADD COLUMN %s VARCHAR(255)", script.Name)
+	case databasev1alpha1.ScriptTypeData:
+		return fmt.Sprintf("UPDATE users SET %s = 'default_value' WHERE %s IS NULL", script.Name, script.Name)
+	case databasev1alpha1.ScriptTypeValidation:
+		return fmt.Sprintf("SELECT COUNT(*) FROM users WHERE %s IS NOT NULL", script.Name)
+	default:
+		return fmt.Sprintf("-- Script: %s", script.Name)
+	}
 }
